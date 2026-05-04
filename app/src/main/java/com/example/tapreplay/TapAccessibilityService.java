@@ -24,27 +24,35 @@ public class TapAccessibilityService extends AccessibilityService {
     private boolean running = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    // 使用方式：人工点击右下角“保存”，进入保存后的确认/测试界面后，再点悬浮按钮“开始”。
-    // 脚本从确认/测试界面开始计时：0ms 点确认/测试/开始；后续节点沿用原成功视频的跳跃节奏。
+    // 正确流程：
+    // 1. 用户停在编辑界面，右下角“保存”可见。
+    // 2. 点悬浮“开始”。悬浮按钮先隐藏，避免挡住保存按钮。
+    // 3. 0ms：脚本点击“保存”。
+    // 4. 453ms：出现“连续两次抵达宝箱的位置……”提示后，脚本点屏幕空白处，游戏立即开始。
+    // 5. 后续跳跃时间以第 4 步这次“提示确认/开始”点击为基准。
     private final long[] tapTimesMs = new long[] {
-            0L,      // 确认/测试/开始
-            862L,    // 第一跳
-            1373L,   // 第二跳
-            2308L,   // 第三跳
-            3396L,   // 右侧关键全包跳/折返点
-            5704L,   // 后续跳
-            7855L,
-            8785L,
-            9489L,
-            10933L
+            0L,      // 保存
+            453L,    // 点提示/确认，立即开始游戏；不是点测试
+            1315L,   // 开始后约 862ms：第一跳
+            1826L,   // 第二跳
+            2761L,   // 第三跳
+            3849L,   // 右侧关键全包跳/折返点
+            6157L,   // 后续跳
+            8308L,
+            9238L,
+            9942L,
+            11386L
     };
 
     // 当前手机：1260 x 2720，横屏实际按 2720 x 1260 计算。全部使用比例坐标。
-    // 注意：不再点击“保存”，保存由人工完成。
-    private static final float START_X_RATIO = 0.398f;
-    private static final float START_Y_RATIO = 0.946f;
+    private static final float SAVE_X_RATIO = 0.903f;
+    private static final float SAVE_Y_RATIO = 0.946f;
 
-    // 跳跃是单点，全屏任意空白区域理论等效；这里放在地图中下部，避开按钮、悬浮窗和系统导航区。
+    // 保存后提示界面：点屏幕中部/中下部空白处即可确认并开始。
+    private static final float PROMPT_X_RATIO = 0.500f;
+    private static final float PROMPT_Y_RATIO = 0.650f;
+
+    // 跳跃是单点，全屏空白区域理论等效；这里继续点中下部，避开按钮、悬浮窗、系统导航区。
     private static final float JUMP_X_RATIO = 0.500f;
     private static final float JUMP_Y_RATIO = 0.720f;
 
@@ -89,7 +97,7 @@ public class TapAccessibilityService extends AccessibilityService {
                     startParamX[0] = params.x;
                     startParamY[0] = params.y;
                     downTime[0] = System.currentTimeMillis();
-                    return false;
+                    return true;
                 case MotionEvent.ACTION_MOVE:
                     params.x = startParamX[0] + ((int) event.getRawX() - startX[0]);
                     params.y = startParamY[0] + ((int) event.getRawY() - startY[0]);
@@ -102,7 +110,7 @@ public class TapAccessibilityService extends AccessibilityService {
                     if (dt < 250 && dx < 12 && dy < 12) toggleRun();
                     return true;
             }
-            return false;
+            return true;
         });
 
         windowManager.addView(floatButton, params);
@@ -114,17 +122,30 @@ public class TapAccessibilityService extends AccessibilityService {
 
     private void startRun() {
         running = true;
-        if (floatButton != null) floatButton.setText("停止");
 
-        // 用一个系统手势承载全部点击，减少 Handler 逐次调度导致的毫秒抖动。
-        dispatchFullTapSequence();
-        handler.postDelayed(this::stopRun, tapTimesMs[tapTimesMs.length - 1] + 500L);
+        // 运行期间先移除悬浮按钮，避免它挡住“保存”按钮或吃掉脚本点击。
+        hideFloatingButton();
+
+        // 等一帧让悬浮窗真正消失，再注入完整点击序列。
+        handler.postDelayed(() -> {
+            if (!running) return;
+            dispatchFullTapSequence();
+            handler.postDelayed(this::stopRun, tapTimesMs[tapTimesMs.length - 1] + 500L);
+        }, 45L);
     }
 
     private void stopRun() {
         running = false;
         handler.removeCallbacksAndMessages(null);
+        showFloatingButton();
         if (floatButton != null) floatButton.setText("开始");
+    }
+
+    private void hideFloatingButton() {
+        if (windowManager != null && floatButton != null) {
+            windowManager.removeView(floatButton);
+            floatButton = null;
+        }
     }
 
     private void dispatchFullTapSequence() {
@@ -132,8 +153,18 @@ public class TapAccessibilityService extends AccessibilityService {
         GestureDescription.Builder builder = new GestureDescription.Builder();
 
         for (int i = 0; i < tapTimesMs.length; i++) {
-            float xr = (i == 0) ? START_X_RATIO : JUMP_X_RATIO;
-            float yr = (i == 0) ? START_Y_RATIO : JUMP_Y_RATIO;
+            float xr;
+            float yr;
+            if (i == 0) {
+                xr = SAVE_X_RATIO;
+                yr = SAVE_Y_RATIO;
+            } else if (i == 1) {
+                xr = PROMPT_X_RATIO;
+                yr = PROMPT_Y_RATIO;
+            } else {
+                xr = JUMP_X_RATIO;
+                yr = JUMP_Y_RATIO;
+            }
             int x = Math.round(size[0] * xr);
             int y = Math.round(size[1] * yr);
             addTapStroke(builder, x, y, tapTimesMs[i], 28L);
@@ -181,9 +212,6 @@ public class TapAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (windowManager != null && floatButton != null) {
-            windowManager.removeView(floatButton);
-            floatButton = null;
-        }
+        hideFloatingButton();
     }
 }
