@@ -10,12 +10,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-apk-main
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -29,21 +35,22 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug
 
-      - name: Copy APK to repo folder
-        run: |
-          mkdir -p apk
-          cp app/build/outputs/apk/debug/*.apk apk/TapReplay-debug.apk
-
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: TapReplay-debug-apk
-          path: apk/TapReplay-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
 
       - name: Commit APK to repository
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+          mkdir -p apk
+          cp app/build/outputs/apk/debug/*.apk apk/TapReplay-debug.apk
           git add apk/TapReplay-debug.apk
           git commit -m "Build debug APK" || echo "No APK changes to commit"
-          git push
+          git push origin HEAD:main
