@@ -6,12 +6,14 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
-import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.view.accessibility.AccessibilityEvent;
@@ -22,7 +24,7 @@ public class TapAccessibilityService extends AccessibilityService {
     private boolean running = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    // 以“点击保存”作为 0ms，包含保存点击、第二次非跳跃点击、后续所有点击
+    // 以“点击保存”作为 0ms，包含保存点击、第二次非跳跃点击、后续所有跳跃点击。
     private final long[] tapTimesMs = new long[] {
             0L,
             453L,
@@ -37,12 +39,15 @@ public class TapAccessibilityService extends AccessibilityService {
             10933L
     };
 
-    // 默认坐标：按横屏 2400x1080 粗略设置。可在代码里按你的手机分辨率微调。
-    // 第 1 次为保存按钮位置；后续为屏幕点击/跳跃位置。
-    private final int saveX = 2130;
-    private final int saveY = 955;
-    private final int tapX = 1180;
-    private final int tapY = 780;
+    // 当前手机：1260 x 2720，横屏实际按 2720 x 1260 计算。
+    // 坐标改为比例坐标，避免不同分辨率下第一下保存点偏。
+    // 0：右下角“保存”；1：底部“测试/开始”；2+：游戏内跳跃点击区域。
+    private static final float SAVE_X_RATIO = 0.903f;
+    private static final float SAVE_Y_RATIO = 0.946f;
+    private static final float TEST_X_RATIO = 0.398f;
+    private static final float TEST_Y_RATIO = 0.946f;
+    private static final float JUMP_X_RATIO = 0.500f;
+    private static final float JUMP_Y_RATIO = 0.720f;
 
     @Override
     public void onServiceConnected() {
@@ -114,17 +119,21 @@ public class TapAccessibilityService extends AccessibilityService {
 
     private void startRun() {
         running = true;
-        floatButton.setText("停止");
-        long base = System.currentTimeMillis();
+        if (floatButton != null) floatButton.setText("停止");
+
         for (int i = 0; i < tapTimesMs.length; i++) {
             final int index = i;
             handler.postDelayed(() -> {
                 if (!running) return;
+
                 if (index == 0) {
-                    performTap(saveX, saveY);
+                    performTapByRatio(SAVE_X_RATIO, SAVE_Y_RATIO);
+                } else if (index == 1) {
+                    performTapByRatio(TEST_X_RATIO, TEST_Y_RATIO);
                 } else {
-                    performTap(tapX, tapY);
+                    performTapByRatio(JUMP_X_RATIO, JUMP_Y_RATIO);
                 }
+
                 if (index == tapTimesMs.length - 1) stopRun();
             }, tapTimesMs[i]);
         }
@@ -134,6 +143,38 @@ public class TapAccessibilityService extends AccessibilityService {
         running = false;
         handler.removeCallbacksAndMessages(null);
         if (floatButton != null) floatButton.setText("开始");
+    }
+
+    private void performTapByRatio(float xr, float yr) {
+        int[] size = getScreenSize();
+        int x = Math.round(size[0] * xr);
+        int y = Math.round(size[1] * yr);
+        performTap(x, y);
+    }
+
+    private int[] getScreenSize() {
+        int width;
+        int height;
+        WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            Rect bounds = wm.getCurrentWindowMetrics().getBounds();
+            width = bounds.width();
+            height = bounds.height();
+        } else {
+            DisplayMetrics metrics = new DisplayMetrics();
+            wm.getDefaultDisplay().getRealMetrics(metrics);
+            width = metrics.widthPixels;
+            height = metrics.heightPixels;
+        }
+
+        // 游戏强制横屏，确保坐标按横屏宽高计算。
+        if (height > width) {
+            int t = width;
+            width = height;
+            height = t;
+        }
+        return new int[] { width, height };
     }
 
     private void performTap(int x, int y) {
