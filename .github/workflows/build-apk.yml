@@ -3,7 +3,12 @@ name: Build APK
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'apk/**'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-apk-main
@@ -33,3 +38,25 @@ jobs:
         with:
           name: TapReplay-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Put APK under apk folder
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          APK_FILE=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
+          TARGET_PATH="apk/TapReplay-debug.apk"
+          CONTENT=$(base64 -w 0 "$APK_FILE")
+          SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${TARGET_PATH}?ref=main" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$SHA" ]; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${TARGET_PATH}" \
+              -f message="Update TapReplay debug APK" \
+              -f content="$CONTENT" \
+              -f sha="$SHA" \
+              -f branch="main"
+          else
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${TARGET_PATH}" \
+              -f message="Add TapReplay debug APK" \
+              -f content="$CONTENT" \
+              -f branch="main"
+          fi
