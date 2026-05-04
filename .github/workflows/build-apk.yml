@@ -3,12 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'apk/**'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 concurrency:
   group: build-apk-main
@@ -20,8 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -40,17 +33,3 @@ jobs:
         with:
           name: TapReplay-debug-apk
           path: app/build/outputs/apk/debug/*.apk
-
-      - name: Commit APK to repository
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git checkout main
-          git reset --hard origin/main
-          mkdir -p apk
-          cp app/build/outputs/apk/debug/*.apk apk/TapReplay-debug.apk
-          git add apk/TapReplay-debug.apk
-          git commit -m "Build debug APK" || echo "No APK changes to commit"
-          git push origin HEAD:main
