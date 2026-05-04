@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">TapReplay</string>
+    <string name="accessibility_service_label">TapReplay 自动点击服务</string>
+    <string name="accessibility_service_description">显示悬浮按钮，并按预设毫秒序列执行屏幕点击。</string>
+</resources>
