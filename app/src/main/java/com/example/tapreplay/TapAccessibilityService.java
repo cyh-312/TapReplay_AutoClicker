@@ -3,6 +3,7 @@ package com.example.tapreplay;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
@@ -16,93 +17,150 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.view.accessibility.AccessibilityEvent;
 
-public class TapAccessibilityService extends AccessibilityService {
-    private WindowManager windowManager;
-    private Button floatButton;
-    private boolean running = false;
-    private final Handler handler = new Handler(Looper.getMainLooper());
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Locale;
 
-    // 使用方式：
-    // 1. 你先人工点右下角“保存”。
-    // 2. 出现“连续两次抵达宝箱的位置，保存地宫设置。”提示。
-    // 3. 这时点悬浮按钮“开始”。悬浮按钮不隐藏。
-    // 4. 脚本 0ms 点提示界面空白处，让游戏真正开始。
-    // 5. 后续跳跃时间以这一次“提示确认/开始”点击为 0 点。
-    //
-    // 根据教学视频重新校准：
-    // 保存点击约 402.8ms；提示确认/开始约 808.1ms；
-    // 跳跃点约 1216.9、1728.2、2662.8、3750.8、6058.5、8209.3、9140.0、9843.9、11288.1ms。
-    // 因此相对“提示确认/开始”的跳跃时间为：409、920、1855、2943、5250、7401、8332、9036、10480ms。
-    private final long[] tapTimesMs = new long[] {
-            0L,      // 点提示界面空白处：确认并开始游戏
-            409L,    // 第一跳
-            920L,    // 第二跳
-            1855L,   // 第三跳
-            2943L,   // 右侧关键全包跳/折返点
-            5250L,   // 后续跳
-            7401L,
-            8332L,
-            9036L,
-            10480L
+public class TapAccessibilityService extends AccessibilityService {
+    private static final String PREF_NAME = "tap_replay_prefs";
+    private static final String KEY_TIMES = "tap_times_ms";
+
+    private WindowManager windowManager;
+    private LinearLayout floatPanel;
+    private Button startButton;
+    private LinearLayout listContainer;
+    private TextView statusText;
+    private WindowManager.LayoutParams panelParams;
+
+    private boolean running = false;
+    private long runStartNs = 0L;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ArrayList<Long> tapTimesMs = new ArrayList<>();
+
+    // 这版默认时间：你人工点保存 -> 出现提示 -> 点悬浮“开始”。
+    // 0ms 点掉提示并启动游戏；跳跃点在教学视频基础上整体后移 60ms，方便补偿提示消失到游戏真正可控的帧延迟。
+    private static final long[] DEFAULT_TIMES = new long[] {
+            0L,      // 提示确认/游戏开始
+            469L,    // 第一跳：409 + 60
+            980L,    // 第二跳：920 + 60
+            1915L,   // 第三跳：1855 + 60
+            3003L,   // 右侧关键全包跳：2943 + 60
+            5310L,   // 后续跳：5250 + 60
+            7461L,
+            8392L,
+            9096L,
+            10540L
     };
 
-    // 当前手机：1260 x 2720，横屏实际按 2720 x 1260 计算。全部使用比例坐标。
-    // 提示界面确认：点屏幕中部/中下部空白处，不点“测试”。
+    // 当前手机 1260 x 2720；横屏按 2720 x 1260 计算。全部用比例坐标。
     private static final float PROMPT_X_RATIO = 0.500f;
     private static final float PROMPT_Y_RATIO = 0.650f;
-
-    // 跳跃单点区域。放在地图中下部，避开悬浮按钮、底部按钮和系统导航区。
     private static final float JUMP_X_RATIO = 0.500f;
     private static final float JUMP_Y_RATIO = 0.720f;
 
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
-        showFloatingButton();
+        loadTimes();
+        showFloatingPanel();
     }
 
-    private void showFloatingButton() {
-        if (!Settings.canDrawOverlays(this) || floatButton != null) return;
+    private void showFloatingPanel() {
+        if (!Settings.canDrawOverlays(this) || floatPanel != null) return;
 
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        floatButton = new Button(this);
-        floatButton.setText("开始");
-        floatButton.setTextColor(Color.WHITE);
-        floatButton.setBackgroundColor(Color.argb(210, 211, 47, 47));
-        floatButton.setTextSize(14);
 
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+        floatPanel = new LinearLayout(this);
+        floatPanel.setOrientation(LinearLayout.VERTICAL);
+        floatPanel.setPadding(dp(6), dp(6), dp(6), dp(6));
+        floatPanel.setBackgroundColor(Color.argb(205, 30, 30, 30));
+
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
+        topRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        startButton = new Button(this);
+        startButton.setText("开始");
+        startButton.setTextColor(Color.WHITE);
+        startButton.setBackgroundColor(Color.argb(230, 211, 47, 47));
+        startButton.setTextSize(13);
+        topRow.addView(startButton, new LinearLayout.LayoutParams(dp(92), dp(46)));
+
+        Button addButton = smallButton("+点");
+        addButton.setOnClickListener(v -> {
+            long next = tapTimesMs.isEmpty() ? 0L : tapTimesMs.get(tapTimesMs.size() - 1) + 500L;
+            tapTimesMs.add(next);
+            saveTimes();
+            refreshList();
+        });
+        topRow.addView(addButton, new LinearLayout.LayoutParams(dp(56), dp(42)));
+
+        Button resetButton = smallButton("重置");
+        resetButton.setOnClickListener(v -> {
+            loadDefaultTimes();
+            saveTimes();
+            refreshList();
+        });
+        topRow.addView(resetButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
+
+        floatPanel.addView(topRow);
+
+        statusText = new TextView(this);
+        statusText.setTextColor(Color.WHITE);
+        statusText.setTextSize(11);
+        statusText.setText("基准：保存后提示界面，点开始执行");
+        statusText.setPadding(0, dp(3), 0, dp(3));
+        floatPanel.addView(statusText);
+
+        ScrollView scrollView = new ScrollView(this);
+        listContainer = new LinearLayout(this);
+        listContainer.setOrientation(LinearLayout.VERTICAL);
+        scrollView.addView(listContainer);
+        floatPanel.addView(scrollView, new LinearLayout.LayoutParams(dp(360), dp(320)));
+
+        panelParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
         );
-        params.gravity = Gravity.TOP | Gravity.START;
-        params.x = 40;
-        params.y = 180;
+        panelParams.gravity = Gravity.TOP | Gravity.START;
+        panelParams.x = 35;
+        panelParams.y = 130;
 
+        attachDragAndStartBehavior();
+        refreshList();
+        windowManager.addView(floatPanel, panelParams);
+    }
+
+    private void attachDragAndStartBehavior() {
         final int[] startX = new int[1];
         final int[] startY = new int[1];
         final int[] startParamX = new int[1];
         final int[] startParamY = new int[1];
         final long[] downTime = new long[1];
 
-        floatButton.setOnTouchListener((v, event) -> {
+        startButton.setOnTouchListener((v, event) -> {
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
                     startX[0] = (int) event.getRawX();
                     startY[0] = (int) event.getRawY();
-                    startParamX[0] = params.x;
-                    startParamY[0] = params.y;
+                    startParamX[0] = panelParams.x;
+                    startParamY[0] = panelParams.y;
                     downTime[0] = System.currentTimeMillis();
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    params.x = startParamX[0] + ((int) event.getRawX() - startX[0]);
-                    params.y = startParamY[0] + ((int) event.getRawY() - startY[0]);
-                    windowManager.updateViewLayout(floatButton, params);
+                    panelParams.x = startParamX[0] + ((int) event.getRawX() - startX[0]);
+                    panelParams.y = startParamY[0] + ((int) event.getRawY() - startY[0]);
+                    if (windowManager != null && floatPanel != null) {
+                        windowManager.updateViewLayout(floatPanel, panelParams);
+                    }
                     return true;
                 case MotionEvent.ACTION_UP:
                     long dt = System.currentTimeMillis() - downTime[0];
@@ -113,8 +171,68 @@ public class TapAccessibilityService extends AccessibilityService {
             }
             return true;
         });
+    }
 
-        windowManager.addView(floatButton, params);
+    private void refreshList() {
+        if (listContainer == null) return;
+        listContainer.removeAllViews();
+
+        for (int i = 0; i < tapTimesMs.size(); i++) {
+            final int index = i;
+            long t = tapTimesMs.get(i);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(2), 0, dp(2));
+
+            TextView label = new TextView(this);
+            label.setTextColor(Color.WHITE);
+            label.setTextSize(10);
+            String name = index == 0 ? "确认" : "跳" + index;
+            label.setText(String.format(Locale.US, "#%02d %s %8.3fms", index + 1, name, (double) t));
+            row.addView(label, new LinearLayout.LayoutParams(dp(138), dp(34)));
+
+            Button minus10 = tinyButton("-10");
+            minus10.setOnClickListener(v -> adjustTime(index, -10));
+            row.addView(minus10, new LinearLayout.LayoutParams(dp(42), dp(32)));
+
+            Button minus1 = tinyButton("-1");
+            minus1.setOnClickListener(v -> adjustTime(index, -1));
+            row.addView(minus1, new LinearLayout.LayoutParams(dp(38), dp(32)));
+
+            Button plus1 = tinyButton("+1");
+            plus1.setOnClickListener(v -> adjustTime(index, 1));
+            row.addView(plus1, new LinearLayout.LayoutParams(dp(38), dp(32)));
+
+            Button plus10 = tinyButton("+10");
+            plus10.setOnClickListener(v -> adjustTime(index, 10));
+            row.addView(plus10, new LinearLayout.LayoutParams(dp(42), dp(32)));
+
+            Button delete = tinyButton("删");
+            delete.setOnClickListener(v -> removeTime(index));
+            row.addView(delete, new LinearLayout.LayoutParams(dp(38), dp(32)));
+
+            listContainer.addView(row);
+        }
+    }
+
+    private void adjustTime(int index, long deltaMs) {
+        if (index < 0 || index >= tapTimesMs.size()) return;
+        long next = tapTimesMs.get(index) + deltaMs;
+        if (next < 0L) next = 0L;
+        tapTimesMs.set(index, next);
+        Collections.sort(tapTimesMs);
+        saveTimes();
+        refreshList();
+    }
+
+    private void removeTime(int index) {
+        if (tapTimesMs.size() <= 1) return;
+        if (index < 0 || index >= tapTimesMs.size()) return;
+        tapTimesMs.remove(index);
+        saveTimes();
+        refreshList();
     }
 
     private void toggleRun() {
@@ -122,33 +240,72 @@ public class TapAccessibilityService extends AccessibilityService {
     }
 
     private void startRun() {
+        if (tapTimesMs.isEmpty()) return;
         running = true;
-        if (floatButton != null) floatButton.setText("停止");
+        runStartNs = System.nanoTime();
+        if (startButton != null) startButton.setText("停止");
+        if (statusText != null) statusText.setText("运行中：" + tapTimesMs.size() + " 次点击");
 
-        // 不再隐藏悬浮按钮，避免额外 45ms 左右的延迟；完整点击序列立即下发。
-        dispatchFullTapSequence();
-        handler.postDelayed(this::stopRun, tapTimesMs[tapTimesMs.length - 1] + 500L);
+        dispatchTapSequenceInChunks();
+        scheduleRunLogs();
+        long last = tapTimesMs.get(tapTimesMs.size() - 1);
+        handler.postDelayed(this::stopRun, last + 700L);
     }
 
     private void stopRun() {
         running = false;
         handler.removeCallbacksAndMessages(null);
-        if (floatButton != null) floatButton.setText("开始");
+        if (startButton != null) startButton.setText("开始");
+        if (statusText != null) statusText.setText("已停止，可继续微调");
     }
 
-    private void dispatchFullTapSequence() {
+    private void dispatchTapSequenceInChunks() {
+        final ArrayList<Long> times = new ArrayList<>(tapTimesMs);
+        Collections.sort(times);
+        final int maxStrokesPerGesture = 10;
+        int start = 0;
+        while (start < times.size()) {
+            final int from = start;
+            final int to = Math.min(start + maxStrokesPerGesture, times.size());
+            final long baseTime = times.get(from);
+            handler.postDelayed(() -> {
+                if (!running) return;
+                dispatchGestureChunk(times, from, to, baseTime);
+            }, baseTime);
+            start = to;
+        }
+    }
+
+    private void dispatchGestureChunk(ArrayList<Long> times, int from, int to, long baseTime) {
         int[] size = getScreenSize();
         GestureDescription.Builder builder = new GestureDescription.Builder();
 
-        for (int i = 0; i < tapTimesMs.length; i++) {
+        for (int i = from; i < to; i++) {
+            long relativeStart = Math.max(0L, times.get(i) - baseTime);
             float xr = (i == 0) ? PROMPT_X_RATIO : JUMP_X_RATIO;
             float yr = (i == 0) ? PROMPT_Y_RATIO : JUMP_Y_RATIO;
             int x = Math.round(size[0] * xr);
             int y = Math.round(size[1] * yr);
-            addTapStroke(builder, x, y, tapTimesMs[i], 28L);
+            addTapStroke(builder, x, y, relativeStart, 28L);
         }
 
         dispatchGesture(builder.build(), null, null);
+    }
+
+    private void scheduleRunLogs() {
+        final ArrayList<Long> times = new ArrayList<>(tapTimesMs);
+        Collections.sort(times);
+        for (int i = 0; i < times.size(); i++) {
+            final int index = i;
+            final long planned = times.get(i);
+            handler.postDelayed(() -> {
+                if (!running || statusText == null) return;
+                double actualMs = (System.nanoTime() - runStartNs) / 1_000_000.0;
+                statusText.setText(String.format(Locale.US,
+                        "#%02d 计划 %.3fms | 记录 %.3fms | 偏差 %.3fms",
+                        index + 1, (double) planned, actualMs, actualMs - planned));
+            }, planned);
+        }
     }
 
     private void addTapStroke(GestureDescription.Builder builder, int x, int y, long startMs, long durationMs) {
@@ -181,6 +338,64 @@ public class TapAccessibilityService extends AccessibilityService {
         return new int[] { width, height };
     }
 
+    private Button smallButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(10);
+        b.setTextColor(Color.WHITE);
+        b.setBackgroundColor(Color.argb(215, 80, 80, 80));
+        b.setPadding(0, 0, 0, 0);
+        return b;
+    }
+
+    private Button tinyButton(String text) {
+        Button b = smallButton(text);
+        b.setTextSize(9);
+        return b;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private void loadTimes() {
+        SharedPreferences sp = getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        String csv = sp.getString(KEY_TIMES, null);
+        tapTimesMs.clear();
+        if (csv == null || csv.trim().isEmpty()) {
+            loadDefaultTimes();
+            saveTimes();
+            return;
+        }
+        String[] parts = csv.split(",");
+        for (String p : parts) {
+            try {
+                long v = Long.parseLong(p.trim());
+                if (v >= 0L) tapTimesMs.add(v);
+            } catch (Exception ignored) { }
+        }
+        if (tapTimesMs.isEmpty()) loadDefaultTimes();
+        Collections.sort(tapTimesMs);
+    }
+
+    private void loadDefaultTimes() {
+        tapTimesMs.clear();
+        for (long v : DEFAULT_TIMES) tapTimesMs.add(v);
+        Collections.sort(tapTimesMs);
+    }
+
+    private void saveTimes() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < tapTimesMs.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(tapTimesMs.get(i));
+        }
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(KEY_TIMES, sb.toString())
+                .apply();
+    }
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) { }
 
@@ -190,9 +405,9 @@ public class TapAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (windowManager != null && floatButton != null) {
-            windowManager.removeView(floatButton);
-            floatButton = null;
+        if (windowManager != null && floatPanel != null) {
+            windowManager.removeView(floatPanel);
+            floatPanel = null;
         }
     }
 }
