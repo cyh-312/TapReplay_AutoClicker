@@ -24,29 +24,27 @@ public class TapAccessibilityService extends AccessibilityService {
     private boolean running = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    // 完整流程：0ms 点保存；453ms 点测试；后续跳跃时间严格沿用原成功视频中“点击测试”后的节点。
-    // 关键修正：上一版把 862ms 当成“保存后第一跳”，实际它是“测试后第一跳”，所以整体早了约 453ms。
+    // 使用方式：人工点击右下角“保存”，进入保存后的确认/测试界面后，再点悬浮按钮“开始”。
+    // 脚本从确认/测试界面开始计时：0ms 点确认/测试/开始；后续节点沿用原成功视频的跳跃节奏。
     private final long[] tapTimesMs = new long[] {
-            0L,      // 保存
-            453L,    // 测试/开始
-            1315L,   // 测试后 862ms：第一跳
-            1826L,   // 测试后 1373ms
-            2761L,   // 测试后 2308ms
-            3849L,   // 测试后 3396ms：右侧折返点/全包跳附近
-            6157L,   // 测试后 5704ms
-            8308L,   // 测试后 7855ms
-            9238L,   // 测试后 8785ms
-            9942L,   // 测试后 9489ms
-            11386L   // 测试后 10933ms
+            0L,      // 确认/测试/开始
+            862L,    // 第一跳
+            1373L,   // 第二跳
+            2308L,   // 第三跳
+            3396L,   // 右侧关键全包跳/折返点
+            5704L,   // 后续跳
+            7855L,
+            8785L,
+            9489L,
+            10933L
     };
 
-    // 当前手机：1260 x 2720，横屏实际按 2720 x 1260 计算。全部使用比例坐标，避免分辨率变化导致点偏。
-    private static final float SAVE_X_RATIO = 0.903f;
-    private static final float SAVE_Y_RATIO = 0.946f;
-    private static final float TEST_X_RATIO = 0.398f;
-    private static final float TEST_Y_RATIO = 0.946f;
+    // 当前手机：1260 x 2720，横屏实际按 2720 x 1260 计算。全部使用比例坐标。
+    // 注意：不再点击“保存”，保存由人工完成。
+    private static final float START_X_RATIO = 0.398f;
+    private static final float START_Y_RATIO = 0.946f;
 
-    // 跳跃是单点，全屏任意位置理论等效；这里放在地图中下部，避开按钮、悬浮窗和系统导航区。
+    // 跳跃是单点，全屏任意空白区域理论等效；这里放在地图中下部，避开按钮、悬浮窗和系统导航区。
     private static final float JUMP_X_RATIO = 0.500f;
     private static final float JUMP_Y_RATIO = 0.720f;
 
@@ -118,9 +116,8 @@ public class TapAccessibilityService extends AccessibilityService {
         running = true;
         if (floatButton != null) floatButton.setText("停止");
 
-        // 用一个系统手势承载全部点击。比逐个 Handler.postDelayed 更稳定，尤其适合“全包跳”这种毫秒窗口。
+        // 用一个系统手势承载全部点击，减少 Handler 逐次调度导致的毫秒抖动。
         dispatchFullTapSequence();
-
         handler.postDelayed(this::stopRun, tapTimesMs[tapTimesMs.length - 1] + 500L);
     }
 
@@ -135,19 +132,8 @@ public class TapAccessibilityService extends AccessibilityService {
         GestureDescription.Builder builder = new GestureDescription.Builder();
 
         for (int i = 0; i < tapTimesMs.length; i++) {
-            float xr;
-            float yr;
-            if (i == 0) {
-                xr = SAVE_X_RATIO;
-                yr = SAVE_Y_RATIO;
-            } else if (i == 1) {
-                xr = TEST_X_RATIO;
-                yr = TEST_Y_RATIO;
-            } else {
-                xr = JUMP_X_RATIO;
-                yr = JUMP_Y_RATIO;
-            }
-
+            float xr = (i == 0) ? START_X_RATIO : JUMP_X_RATIO;
+            float yr = (i == 0) ? START_Y_RATIO : JUMP_Y_RATIO;
             int x = Math.round(size[0] * xr);
             int y = Math.round(size[1] * yr);
             addTapStroke(builder, x, y, tapTimesMs[i], 28L);
