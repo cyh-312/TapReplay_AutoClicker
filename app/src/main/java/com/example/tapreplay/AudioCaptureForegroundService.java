@@ -120,16 +120,16 @@ public class AudioCaptureForegroundService extends Service {
             return;
         }
         recording = false;
-        publishState("正在结束内部音频并分析...");
+        publishState("正在结束内部音频并精确分析...");
         final short[] pcm = recorder.stopAndGetPcm();
         recorder = null;
 
         new Thread(() -> {
-            AudioJumpAnalyzer.Result result = AudioJumpAnalyzer.analyze(pcm, AudioJumpAnalyzer.SAMPLE_RATE);
+            AudioJumpAnalyzer.Result result = PreciseJumpAnalyzer.analyze(pcm, PreciseJumpAnalyzer.SAMPLE_RATE);
             publishResult(result);
             cleanupForeground();
             stopSelf();
-        }, "TapReplayAudioForegroundAnalyze").start();
+        }, "TapReplayPreciseAudioAnalyze").start();
     }
 
     private void handleDiscard() {
