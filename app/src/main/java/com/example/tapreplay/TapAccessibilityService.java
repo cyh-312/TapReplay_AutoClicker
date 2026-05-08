@@ -53,7 +53,6 @@ public class TapAccessibilityService extends AccessibilityService {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ArrayList<Long> tapTimesMs = new ArrayList<>();
     private final ArrayList<Long> recommendedTimesMs = new ArrayList<>();
-    private InternalAudioRecorder audioRecorder;
     private AudioJumpAnalyzer.Result lastAnalysisResult;
 
     // 这版默认时间：你人工点保存 -> 出现提示 -> 点悬浮“开始”。
@@ -89,7 +88,22 @@ public class TapAccessibilityService extends AccessibilityService {
         if (!Settings.canDrawOverlays(this) || floatPanel != null) return;
 
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        audioRecorder = new InternalAudioRecorder(this, text -> handler.post(() -> setStatus(text)));
+        AudioCaptureForegroundService.setListener(new AudioCaptureForegroundService.Listener() {
+            @Override
+            public void onState(String text) {
+                handler.post(() -> {
+                    setStatus(text);
+                    if (analyzeButton != null && AudioCaptureForegroundService.isRecording()) {
+                        analyzeButton.setText("结束分析");
+                    }
+                });
+            }
+
+            @Override
+            public void onResult(AudioJumpAnalyzer.Result result) {
+                handler.post(() -> handleAudioAnalysisResult(result));
+            }
+        });
 
         floatPanel = new LinearLayout(this);
         floatPanel.setOrientation(LinearLayout.VERTICAL);
@@ -122,6 +136,7 @@ public class TapAccessibilityService extends AccessibilityService {
             refreshList();
             recommendedTimesMs.clear();
             lastAnalysisResult = null;
+            setApplyEnabled(false);
             setStatus("已重置为默认预设");
         });
         topRow.addView(resetButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
@@ -313,10 +328,7 @@ public class TapAccessibilityService extends AccessibilityService {
     }
 
     private void toggleAudioAnalysis() {
-        if (audioRecorder == null) {
-            audioRecorder = new InternalAudioRecorder(this, text -> handler.post(() -> setStatus(text)));
-        }
-        if (audioRecorder.isRecording()) finishAudioAnalysis(); else startAudioAnalysis();
+        if (AudioCaptureForegroundService.isRecording()) finishAudioAnalysis(); else startAudioAnalysis();
     }
 
     private void startAudioAnalysis() {
@@ -324,33 +336,28 @@ public class TapAccessibilityService extends AccessibilityService {
         recommendedTimesMs.clear();
         lastAnalysisResult = null;
         setApplyEnabled(false);
-        if (audioRecorder.start()) {
-            if (analyzeButton != null) analyzeButton.setText("结束分析");
-            setStatus("内部音频分析中：打一遍/播放本关，结束后生成推荐点");
-        } else {
-            setStatus(audioRecorder.getLastError());
-        }
+        if (analyzeButton != null) analyzeButton.setText("结束分析");
+        setStatus("正在启动前台内部音频捕获...");
+        AudioCaptureForegroundService.start(this);
     }
 
     private void finishAudioAnalysis() {
         if (analyzeButton != null) analyzeButton.setText("分析中...");
-        setStatus("正在分析内部音频...");
-        final short[] pcm = audioRecorder.stopAndGetPcm();
-        new Thread(() -> {
-            final AudioJumpAnalyzer.Result result = AudioJumpAnalyzer.analyze(pcm, AudioJumpAnalyzer.SAMPLE_RATE);
-            handler.post(() -> {
-                lastAnalysisResult = result;
-                recommendedTimesMs.clear();
-                recommendedTimesMs.addAll(result.recommendedTimesMs);
-                if (analyzeButton != null) analyzeButton.setText("音频分析");
-                setApplyEnabled(!recommendedTimesMs.isEmpty());
-                if (recommendedTimesMs.isEmpty()) {
-                    setStatus(result.debugText);
-                } else {
-                    setStatus(result.debugText + " | 推荐：" + formatTimes(recommendedTimesMs));
-                }
-            });
-        }, "TapReplayAudioAnalyze").start();
+        setStatus("正在结束内部音频并分析...");
+        AudioCaptureForegroundService.stop(this);
+    }
+
+    private void handleAudioAnalysisResult(AudioJumpAnalyzer.Result result) {
+        lastAnalysisResult = result;
+        recommendedTimesMs.clear();
+        recommendedTimesMs.addAll(result.recommendedTimesMs);
+        if (analyzeButton != null) analyzeButton.setText("音频分析");
+        setApplyEnabled(!recommendedTimesMs.isEmpty());
+        if (recommendedTimesMs.isEmpty()) {
+            setStatus(result.debugText);
+        } else {
+            setStatus(result.debugText + " | 推荐：" + formatTimes(recommendedTimesMs));
+        }
     }
 
     private void applyRecommendedTimes() {
@@ -388,7 +395,7 @@ public class TapAccessibilityService extends AccessibilityService {
     }
 
     private void toggleRun() {
-        if (audioRecorder != null && audioRecorder.isRecording()) {
+        if (AudioCaptureForegroundService.isRecording()) {
             setStatus("请先结束音频分析，再开始执行");
             return;
         }
@@ -573,7 +580,8 @@ public class TapAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (audioRecorder != null) audioRecorder.discard();
+        AudioCaptureForegroundService.setListener(null);
+        AudioCaptureForegroundService.discard(this);
         if (windowManager != null && floatPanel != null) {
             windowManager.removeView(floatPanel);
             floatPanel = null;
