@@ -36,7 +36,7 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER);
 
         TextView info = new TextView(this);
-        info.setText("1. 打开悬浮窗权限\n2. 授权内部音频捕获\n3. 打开无障碍服务：TapReplay 自动点击服务\n4. 回到游戏，用悬浮窗分析音频或执行点击序列");
+        info.setText("1. 打开悬浮窗权限\n2. 授权录音权限\n3. 授权内部音频捕获\n4. 打开无障碍服务\n5. 回到游戏，用悬浮窗分析音频或执行点击序列\n\n说明：这里的录音权限用于 Android 内部音频捕获，不走麦克风外放方案。");
         info.setTextSize(16);
         info.setTextColor(Color.DKGRAY);
         info.setPadding(0, 30, 0, 30);
@@ -54,8 +54,14 @@ public class MainActivity extends Activity {
                 Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                         Uri.parse("package:" + getPackageName()));
                 startActivity(intent);
+            } else {
+                setStatus("悬浮窗权限已开启。", false);
             }
         });
+
+        Button micPermBtn = new Button(this);
+        micPermBtn.setText("授权录音权限");
+        micPermBtn.setOnClickListener(v -> requestRecordAudioPermissionOnly());
 
         Button audioBtn = new Button(this);
         audioBtn.setText("授权内部音频捕获");
@@ -69,6 +75,7 @@ public class MainActivity extends Activity {
         root.addView(info);
         root.addView(statusText);
         root.addView(overlayBtn);
+        root.addView(micPermBtn);
         root.addView(audioBtn);
         root.addView(accBtn);
         setContentView(root);
@@ -80,13 +87,28 @@ public class MainActivity extends Activity {
         updateStatus();
     }
 
+    private boolean hasRecordAudioPermission() {
+        return Build.VERSION.SDK_INT < 23 || checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestRecordAudioPermissionOnly() {
+        if (hasRecordAudioPermission()) {
+            setStatus("录音权限已授权。下一步点“授权内部音频捕获”。", false);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, REQ_RECORD_AUDIO);
+        }
+    }
+
     private void requestInternalAudioCapture() {
         if (Build.VERSION.SDK_INT < 29) {
             setStatus("内部音频捕获需要 Android 10+。你的系统版本不支持。", true);
             return;
         }
-        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, REQ_RECORD_AUDIO);
+        if (!hasRecordAudioPermission()) {
+            setStatus("还缺录音权限。请先点“授权录音权限”，允许后再点“授权内部音频捕获”。", true);
+            requestRecordAudioPermissionOnly();
             return;
         }
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
@@ -102,9 +124,9 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_RECORD_AUDIO) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                requestInternalAudioCapture();
+                setStatus("录音权限已授权。现在点“授权内部音频捕获”，允许系统弹窗。", false);
             } else {
-                setStatus("未授予录音权限，无法捕获内部游戏音频。", true);
+                setStatus("未授予录音权限，无法捕获内部游戏音频。请到系统应用权限里允许 TapReplay 录音。", true);
             }
         }
     }
@@ -125,8 +147,11 @@ public class MainActivity extends Activity {
 
     private void updateStatus() {
         boolean overlay = Settings.canDrawOverlays(this);
-        boolean audio = AudioCaptureHolder.hasProjectionGrant();
-        setStatus("悬浮窗：" + (overlay ? "已开" : "未开") + " | 内部音频：" + (audio ? "已授权" : "未授权"), false);
+        boolean recordAudio = hasRecordAudioPermission();
+        boolean projection = AudioCaptureHolder.hasProjectionGrant();
+        setStatus("悬浮窗：" + (overlay ? "已开" : "未开")
+                + " | 录音权限：" + (recordAudio ? "已授权" : "未授权")
+                + " | 内部音频：" + (projection ? "已授权" : "未授权"), false);
     }
 
     private void setStatus(String text, boolean warning) {
