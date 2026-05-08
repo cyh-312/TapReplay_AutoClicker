@@ -13,6 +13,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
@@ -24,14 +25,20 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER);
-        root.setPadding(40, 40, 40, 40);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setPadding(dp(20), dp(28), dp(20), dp(28));
+        scrollView.addView(root, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT,
+                ScrollView.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
         title.setText("TapReplay 自动点击器");
-        title.setTextSize(24);
+        title.setTextSize(26);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
 
@@ -39,16 +46,15 @@ public class MainActivity extends Activity {
         info.setText("1. 打开悬浮窗权限\n2. 授权录音权限\n3. 授权内部音频捕获\n4. 打开无障碍服务\n5. 回到游戏，用悬浮窗分析音频或执行点击序列\n\n说明：这里的录音权限用于 Android 内部音频捕获，不走麦克风外放方案。");
         info.setTextSize(16);
         info.setTextColor(Color.DKGRAY);
-        info.setPadding(0, 30, 0, 30);
+        info.setPadding(0, dp(24), 0, dp(18));
 
         statusText = new TextView(this);
         statusText.setTextSize(14);
         statusText.setTextColor(Color.DKGRAY);
-        statusText.setPadding(0, 0, 0, 20);
+        statusText.setPadding(0, 0, 0, dp(16));
         updateStatus();
 
-        Button overlayBtn = new Button(this);
-        overlayBtn.setText("打开悬浮窗权限");
+        Button overlayBtn = fullWidthButton("打开悬浮窗权限");
         overlayBtn.setOnClickListener(v -> {
             if (!Settings.canDrawOverlays(this)) {
                 Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -59,26 +65,31 @@ public class MainActivity extends Activity {
             }
         });
 
-        Button micPermBtn = new Button(this);
-        micPermBtn.setText("授权录音权限");
+        Button micPermBtn = fullWidthButton("授权录音权限");
         micPermBtn.setOnClickListener(v -> requestRecordAudioPermissionOnly());
 
-        Button audioBtn = new Button(this);
-        audioBtn.setText("授权内部音频捕获");
+        Button audioBtn = fullWidthButton("授权内部音频捕获");
         audioBtn.setOnClickListener(v -> requestInternalAudioCapture());
 
-        Button accBtn = new Button(this);
-        accBtn.setText("打开无障碍设置");
+        Button accBtn = fullWidthButton("打开无障碍设置");
         accBtn.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
 
-        root.addView(title);
-        root.addView(info);
-        root.addView(statusText);
-        root.addView(overlayBtn);
-        root.addView(micPermBtn);
-        root.addView(audioBtn);
-        root.addView(accBtn);
-        setContentView(root);
+        TextView tip = new TextView(this);
+        tip.setText("提示：主界面仅用于授权，已改为竖屏滚动；游戏内仍通过悬浮窗操作。");
+        tip.setTextSize(13);
+        tip.setTextColor(Color.GRAY);
+        tip.setGravity(Gravity.CENTER);
+        tip.setPadding(0, dp(14), 0, 0);
+
+        root.addView(title, fullWidthParams(0));
+        root.addView(info, fullWidthParams(0));
+        root.addView(statusText, fullWidthParams(0));
+        root.addView(overlayBtn, fullWidthParams(dp(10)));
+        root.addView(micPermBtn, fullWidthParams(dp(10)));
+        root.addView(audioBtn, fullWidthParams(dp(10)));
+        root.addView(accBtn, fullWidthParams(dp(10)));
+        root.addView(tip, fullWidthParams(0));
+        setContentView(scrollView);
     }
 
     @Override
@@ -159,5 +170,25 @@ public class MainActivity extends Activity {
             statusText.setText(text);
             statusText.setTextColor(warning ? Color.rgb(180, 40, 40) : Color.DKGRAY);
         }
+    }
+
+    private Button fullWidthButton(String text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextSize(16);
+        button.setAllCaps(false);
+        return button;
+    }
+
+    private LinearLayout.LayoutParams fullWidthParams(int topMargin) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.topMargin = topMargin;
+        return params;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }
