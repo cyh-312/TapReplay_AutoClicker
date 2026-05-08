@@ -1,11 +1,12 @@
 package com.example.tapreplay;
 
+import android.Manifest;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
-import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
@@ -55,8 +56,13 @@ public final class InternalAudioRecorder {
             emit(lastError);
             return false;
         }
+        if (Build.VERSION.SDK_INT >= 23 && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            lastError = "还缺录音权限：回到 TapReplay 主界面点“授权录音权限”";
+            emit(lastError);
+            return false;
+        }
         if (!AudioCaptureHolder.hasProjectionGrant()) {
-            lastError = "请先回到 TapReplay 主界面授权内部音频捕获";
+            lastError = "还缺内部音频捕获授权：回到 TapReplay 主界面点“授权内部音频捕获”";
             emit(lastError);
             return false;
         }
@@ -113,7 +119,7 @@ public final class InternalAudioRecorder {
             emit("内部音频分析中...");
             return true;
         } catch (SecurityException se) {
-            lastError = "缺少录音/内部音频权限，请在系统权限中允许 TapReplay 录音";
+            lastError = "权限被系统拒绝：请确认 TapReplay 已有录音权限，并重新授权内部音频捕获";
             recording = false;
             cleanup();
             emit(lastError);
