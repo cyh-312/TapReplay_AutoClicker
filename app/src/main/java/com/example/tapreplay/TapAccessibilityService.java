@@ -15,6 +15,7 @@ import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -29,15 +30,22 @@ import java.util.Locale;
 public class TapAccessibilityService extends AccessibilityService {
     private static final String PREF_NAME = "tap_replay_prefs";
     private static final String KEY_TIMES = "tap_times_ms";
+    private static final String KEY_COMPACT_MODE = "compact_mode";
 
     private WindowManager windowManager;
     private LinearLayout floatPanel;
+    private LinearLayout topRow;
     private Button startButton;
+    private Button addButton;
+    private Button resetButton;
+    private Button hideButton;
     private LinearLayout listContainer;
+    private ScrollView scrollView;
     private TextView statusText;
     private WindowManager.LayoutParams panelParams;
 
     private boolean running = false;
+    private boolean compactMode = false;
     private long runStartNs = 0L;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ArrayList<Long> tapTimesMs = new ArrayList<>();
@@ -67,6 +75,7 @@ public class TapAccessibilityService extends AccessibilityService {
     public void onServiceConnected() {
         super.onServiceConnected();
         loadTimes();
+        loadPanelMode();
         showFloatingPanel();
     }
 
@@ -77,10 +86,9 @@ public class TapAccessibilityService extends AccessibilityService {
 
         floatPanel = new LinearLayout(this);
         floatPanel.setOrientation(LinearLayout.VERTICAL);
-        floatPanel.setPadding(dp(6), dp(6), dp(6), dp(6));
         floatPanel.setBackgroundColor(Color.argb(205, 30, 30, 30));
 
-        LinearLayout topRow = new LinearLayout(this);
+        topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -91,7 +99,7 @@ public class TapAccessibilityService extends AccessibilityService {
         startButton.setTextSize(13);
         topRow.addView(startButton, new LinearLayout.LayoutParams(dp(92), dp(46)));
 
-        Button addButton = smallButton("+点");
+        addButton = smallButton("+点");
         addButton.setOnClickListener(v -> {
             long next = tapTimesMs.isEmpty() ? 0L : tapTimesMs.get(tapTimesMs.size() - 1) + 500L;
             tapTimesMs.add(next);
@@ -100,7 +108,7 @@ public class TapAccessibilityService extends AccessibilityService {
         });
         topRow.addView(addButton, new LinearLayout.LayoutParams(dp(56), dp(42)));
 
-        Button resetButton = smallButton("重置");
+        resetButton = smallButton("重置");
         resetButton.setOnClickListener(v -> {
             loadDefaultTimes();
             saveTimes();
@@ -108,16 +116,24 @@ public class TapAccessibilityService extends AccessibilityService {
         });
         topRow.addView(resetButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
 
+        hideButton = smallButton("隐藏");
+        hideButton.setOnClickListener(v -> {
+            compactMode = true;
+            savePanelMode();
+            applyPanelMode();
+        });
+        topRow.addView(hideButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
+
         floatPanel.addView(topRow);
 
         statusText = new TextView(this);
         statusText.setTextColor(Color.WHITE);
         statusText.setTextSize(11);
-        statusText.setText("基准：保存后提示界面，点开始执行");
+        statusText.setText("基准：保存后提示界面，点开始执行；长按开始可展开/收起设置");
         statusText.setPadding(0, dp(3), 0, dp(3));
         floatPanel.addView(statusText);
 
-        ScrollView scrollView = new ScrollView(this);
+        scrollView = new ScrollView(this);
         listContainer = new LinearLayout(this);
         listContainer.setOrientation(LinearLayout.VERTICAL);
         scrollView.addView(listContainer);
@@ -136,6 +152,7 @@ public class TapAccessibilityService extends AccessibilityService {
 
         attachDragAndStartBehavior();
         refreshList();
+        applyPanelMode();
         windowManager.addView(floatPanel, panelParams);
     }
 
@@ -166,11 +183,44 @@ public class TapAccessibilityService extends AccessibilityService {
                     long dt = System.currentTimeMillis() - downTime[0];
                     int dx = Math.abs((int) event.getRawX() - startX[0]);
                     int dy = Math.abs((int) event.getRawY() - startY[0]);
-                    if (dt < 250 && dx < 12 && dy < 12) toggleRun();
+                    if (dx < 12 && dy < 12) {
+                        if (dt >= 600) {
+                            compactMode = !compactMode;
+                            savePanelMode();
+                            applyPanelMode();
+                        } else if (dt < 250) {
+                            toggleRun();
+                        }
+                    }
                     return true;
             }
             return true;
         });
+    }
+
+    private void applyPanelMode() {
+        if (floatPanel == null || startButton == null) return;
+
+        int otherVisibility = compactMode ? View.GONE : View.VISIBLE;
+        if (addButton != null) addButton.setVisibility(otherVisibility);
+        if (resetButton != null) resetButton.setVisibility(otherVisibility);
+        if (hideButton != null) hideButton.setVisibility(otherVisibility);
+        if (statusText != null) statusText.setVisibility(otherVisibility);
+        if (scrollView != null) scrollView.setVisibility(otherVisibility);
+
+        if (compactMode) {
+            floatPanel.setPadding(dp(2), dp(2), dp(2), dp(2));
+            startButton.setTextSize(12);
+            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(76), dp(40)));
+        } else {
+            floatPanel.setPadding(dp(6), dp(6), dp(6), dp(6));
+            startButton.setTextSize(13);
+            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(92), dp(46)));
+        }
+
+        if (windowManager != null && floatPanel != null && panelParams != null && floatPanel.isAttachedToWindow()) {
+            windowManager.updateViewLayout(floatPanel, panelParams);
+        }
     }
 
     private void refreshList() {
@@ -393,6 +443,18 @@ public class TapAccessibilityService extends AccessibilityService {
         getSharedPreferences(PREF_NAME, MODE_PRIVATE)
                 .edit()
                 .putString(KEY_TIMES, sb.toString())
+                .apply();
+    }
+
+    private void loadPanelMode() {
+        SharedPreferences sp = getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        compactMode = sp.getBoolean(KEY_COMPACT_MODE, false);
+    }
+
+    private void savePanelMode() {
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_COMPACT_MODE, compactMode)
                 .apply();
     }
 
