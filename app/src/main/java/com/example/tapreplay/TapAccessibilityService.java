@@ -2,6 +2,7 @@ package com.example.tapreplay;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -12,16 +13,19 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.util.DisplayMetrics;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.view.accessibility.AccessibilityEvent;
+import android.util.DisplayMetrics;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -38,6 +42,7 @@ public class TapAccessibilityService extends AccessibilityService {
     private LinearLayout analysisRow;
     private Button startButton;
     private Button addButton;
+    private Button inputButton;
     private Button resetButton;
     private Button hideButton;
     private Button analyzeButton;
@@ -55,22 +60,25 @@ public class TapAccessibilityService extends AccessibilityService {
     private final ArrayList<Long> recommendedTimesMs = new ArrayList<>();
     private AudioJumpAnalyzer.Result lastAnalysisResult;
 
-    // 这版默认时间：你人工点保存 -> 出现提示 -> 点悬浮“开始”。
-    // 0ms 点掉提示并启动游戏；跳跃点在教学视频基础上整体后移 60ms，方便补偿提示消失到游戏真正可控的帧延迟。
+    // 默认方案：人工点保存 -> 出现提示 -> 点悬浮开始。
+    // #01 = 点掉提示并开始游戏；后续为跳跃。已包含 60ms 的全局后移补偿。
     private static final long[] DEFAULT_TIMES = new long[] {
-            0L,      // 提示确认/游戏开始
-            469L,    // 第一跳：409 + 60
-            980L,    // 第二跳：920 + 60
-            1915L,   // 第三跳：1855 + 60
-            3003L,   // 右侧关键全包跳：2943 + 60
-            5310L,   // 后续跳：5250 + 60
+            0L,
+            469L,
+            980L,
+            1915L,
+            3003L,
+            5310L,
             7461L,
             8392L,
             9096L,
             10540L
     };
 
-    // 当前手机 1260 x 2720；横屏按 2720 x 1260 计算。全部用比例坐标。
+    // 输入档位码映射。0~4 代表相对默认时间的微调。
+    // 0 = 提前80ms；1 = 提前40ms；2 = 默认；3 = 延后40ms；4 = 延后80ms。
+    private static final long[] CODE_OFFSETS = new long[] { -80L, -40L, 0L, 40L, 80L };
+
     private static final float PROMPT_X_RATIO = 0.500f;
     private static final float PROMPT_Y_RATIO = 0.650f;
     private static final float JUMP_X_RATIO = 0.500f;
@@ -93,9 +101,7 @@ public class TapAccessibilityService extends AccessibilityService {
             public void onState(String text) {
                 handler.post(() -> {
                     setStatus(text);
-                    if (analyzeButton != null && AudioCaptureForegroundService.isRecording()) {
-                        analyzeButton.setText("结束分析");
-                    }
+                    if (analyzeButton != null && AudioCaptureForegroundService.isRecording()) analyzeButton.setText("结束");
                 });
             }
 
@@ -107,7 +113,8 @@ public class TapAccessibilityService extends AccessibilityService {
 
         floatPanel = new LinearLayout(this);
         floatPanel.setOrientation(LinearLayout.VERTICAL);
-        floatPanel.setBackgroundColor(Color.argb(205, 30, 30, 30));
+        floatPanel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        floatPanel.setBackgroundColor(Color.argb(210, 25, 25, 25));
 
         topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -116,9 +123,9 @@ public class TapAccessibilityService extends AccessibilityService {
         startButton = new Button(this);
         startButton.setText("开始");
         startButton.setTextColor(Color.WHITE);
-        startButton.setBackgroundColor(Color.argb(230, 211, 47, 47));
-        startButton.setTextSize(13);
-        topRow.addView(startButton, new LinearLayout.LayoutParams(dp(92), dp(46)));
+        startButton.setBackgroundColor(Color.argb(235, 211, 47, 47));
+        startButton.setTextSize(12);
+        topRow.addView(startButton, new LinearLayout.LayoutParams(dp(78), dp(42)));
 
         addButton = smallButton("+点");
         addButton.setOnClickListener(v -> {
@@ -126,8 +133,13 @@ public class TapAccessibilityService extends AccessibilityService {
             tapTimesMs.add(next);
             saveTimes();
             refreshList();
+            setStatus("已新增点击：" + next + "ms");
         });
-        topRow.addView(addButton, new LinearLayout.LayoutParams(dp(56), dp(42)));
+        topRow.addView(addButton, new LinearLayout.LayoutParams(dp(48), dp(38)));
+
+        inputButton = smallButton("输入");
+        inputButton.setOnClickListener(v -> showInputDialog());
+        topRow.addView(inputButton, new LinearLayout.LayoutParams(dp(52), dp(38)));
 
         resetButton = smallButton("重置");
         resetButton.setOnClickListener(v -> {
@@ -139,7 +151,7 @@ public class TapAccessibilityService extends AccessibilityService {
             setApplyEnabled(false);
             setStatus("已重置为默认预设");
         });
-        topRow.addView(resetButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
+        topRow.addView(resetButton, new LinearLayout.LayoutParams(dp(52), dp(38)));
 
         hideButton = smallButton("隐藏");
         hideButton.setOnClickListener(v -> {
@@ -147,8 +159,7 @@ public class TapAccessibilityService extends AccessibilityService {
             savePanelMode();
             applyPanelMode();
         });
-        topRow.addView(hideButton, new LinearLayout.LayoutParams(dp(64), dp(42)));
-
+        topRow.addView(hideButton, new LinearLayout.LayoutParams(dp(52), dp(38)));
         floatPanel.addView(topRow);
 
         analysisRow = new LinearLayout(this);
@@ -157,28 +168,35 @@ public class TapAccessibilityService extends AccessibilityService {
 
         analyzeButton = smallButton("音频分析");
         analyzeButton.setOnClickListener(v -> toggleAudioAnalysis());
-        analysisRow.addView(analyzeButton, new LinearLayout.LayoutParams(dp(92), dp(38)));
+        analysisRow.addView(analyzeButton, new LinearLayout.LayoutParams(dp(78), dp(34)));
 
         applyButton = smallButton("应用推荐");
         applyButton.setEnabled(false);
         applyButton.setAlpha(0.55f);
         applyButton.setOnClickListener(v -> applyRecommendedTimes());
-        analysisRow.addView(applyButton, new LinearLayout.LayoutParams(dp(92), dp(38)));
+        analysisRow.addView(applyButton, new LinearLayout.LayoutParams(dp(86), dp(34)));
 
+        Button allMinus = smallButton("全-10");
+        allMinus.setOnClickListener(v -> adjustAllJumps(-10));
+        analysisRow.addView(allMinus, new LinearLayout.LayoutParams(dp(62), dp(34)));
+
+        Button allPlus = smallButton("全+10");
+        allPlus.setOnClickListener(v -> adjustAllJumps(10));
+        analysisRow.addView(allPlus, new LinearLayout.LayoutParams(dp(62), dp(34)));
         floatPanel.addView(analysisRow);
 
         statusText = new TextView(this);
         statusText.setTextColor(Color.WHITE);
-        statusText.setTextSize(11);
-        statusText.setText("基准：保存后提示界面，点开始执行；长按开始可展开/收起设置");
-        statusText.setPadding(0, dp(3), 0, dp(3));
+        statusText.setTextSize(10);
+        statusText.setText("保存后提示界面点开始；长按开始收起/展开");
+        statusText.setPadding(0, dp(2), 0, dp(2));
         floatPanel.addView(statusText);
 
         scrollView = new ScrollView(this);
         listContainer = new LinearLayout(this);
         listContainer.setOrientation(LinearLayout.VERTICAL);
         scrollView.addView(listContainer);
-        floatPanel.addView(scrollView, new LinearLayout.LayoutParams(dp(390), dp(320)));
+        floatPanel.addView(scrollView, new LinearLayout.LayoutParams(dp(328), dp(245)));
 
         panelParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -188,8 +206,8 @@ public class TapAccessibilityService extends AccessibilityService {
                 PixelFormat.TRANSLUCENT
         );
         panelParams.gravity = Gravity.TOP | Gravity.START;
-        panelParams.x = 35;
-        panelParams.y = 130;
+        panelParams.x = 25;
+        panelParams.y = 110;
 
         attachDragAndStartBehavior();
         refreshList();
@@ -216,9 +234,7 @@ public class TapAccessibilityService extends AccessibilityService {
                 case MotionEvent.ACTION_MOVE:
                     panelParams.x = startParamX[0] + ((int) event.getRawX() - startX[0]);
                     panelParams.y = startParamY[0] + ((int) event.getRawY() - startY[0]);
-                    if (windowManager != null && floatPanel != null) {
-                        windowManager.updateViewLayout(floatPanel, panelParams);
-                    }
+                    if (windowManager != null && floatPanel != null) windowManager.updateViewLayout(floatPanel, panelParams);
                     return true;
                 case MotionEvent.ACTION_UP:
                     long dt = System.currentTimeMillis() - downTime[0];
@@ -229,9 +245,7 @@ public class TapAccessibilityService extends AccessibilityService {
                             compactMode = !compactMode;
                             savePanelMode();
                             applyPanelMode();
-                        } else if (dt < 250) {
-                            toggleRun();
-                        }
+                        } else if (dt < 250) toggleRun();
                     }
                     return true;
             }
@@ -241,25 +255,24 @@ public class TapAccessibilityService extends AccessibilityService {
 
     private void applyPanelMode() {
         if (floatPanel == null || startButton == null) return;
-
-        int otherVisibility = compactMode ? View.GONE : View.VISIBLE;
-        if (addButton != null) addButton.setVisibility(otherVisibility);
-        if (resetButton != null) resetButton.setVisibility(otherVisibility);
-        if (hideButton != null) hideButton.setVisibility(otherVisibility);
-        if (analysisRow != null) analysisRow.setVisibility(otherVisibility);
-        if (statusText != null) statusText.setVisibility(otherVisibility);
-        if (scrollView != null) scrollView.setVisibility(otherVisibility);
+        int v = compactMode ? View.GONE : View.VISIBLE;
+        if (addButton != null) addButton.setVisibility(v);
+        if (inputButton != null) inputButton.setVisibility(v);
+        if (resetButton != null) resetButton.setVisibility(v);
+        if (hideButton != null) hideButton.setVisibility(v);
+        if (analysisRow != null) analysisRow.setVisibility(v);
+        if (statusText != null) statusText.setVisibility(v);
+        if (scrollView != null) scrollView.setVisibility(v);
 
         if (compactMode) {
-            floatPanel.setPadding(dp(2), dp(2), dp(2), dp(2));
-            startButton.setTextSize(12);
-            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(76), dp(40)));
+            floatPanel.setPadding(dp(1), dp(1), dp(1), dp(1));
+            startButton.setTextSize(11);
+            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(66), dp(34)));
         } else {
-            floatPanel.setPadding(dp(6), dp(6), dp(6), dp(6));
-            startButton.setTextSize(13);
-            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(92), dp(46)));
+            floatPanel.setPadding(dp(4), dp(4), dp(4), dp(4));
+            startButton.setTextSize(12);
+            startButton.setLayoutParams(new LinearLayout.LayoutParams(dp(78), dp(42)));
         }
-
         if (windowManager != null && floatPanel != null && panelParams != null && floatPanel.isAttachedToWindow()) {
             windowManager.updateViewLayout(floatPanel, panelParams);
         }
@@ -268,7 +281,6 @@ public class TapAccessibilityService extends AccessibilityService {
     private void refreshList() {
         if (listContainer == null) return;
         listContainer.removeAllViews();
-
         for (int i = 0; i < tapTimesMs.size(); i++) {
             final int index = i;
             long t = tapTimesMs.get(i);
@@ -276,37 +288,178 @@ public class TapAccessibilityService extends AccessibilityService {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(2), 0, dp(2));
+            row.setPadding(0, dp(1), 0, dp(1));
 
             TextView label = new TextView(this);
             label.setTextColor(Color.WHITE);
-            label.setTextSize(10);
+            label.setTextSize(9);
             String name = index == 0 ? "确认" : "跳" + index;
-            label.setText(String.format(Locale.US, "#%02d %s %8.3fms", index + 1, name, (double) t));
-            row.addView(label, new LinearLayout.LayoutParams(dp(138), dp(34)));
+            label.setText(String.format(Locale.US, "#%02d %s %8.3f", index + 1, name, (double) t));
+            row.addView(label, new LinearLayout.LayoutParams(dp(116), dp(29)));
 
             Button minus10 = tinyButton("-10");
             minus10.setOnClickListener(v -> adjustTime(index, -10));
-            row.addView(minus10, new LinearLayout.LayoutParams(dp(42), dp(32)));
-
+            row.addView(minus10, new LinearLayout.LayoutParams(dp(38), dp(28)));
             Button minus1 = tinyButton("-1");
             minus1.setOnClickListener(v -> adjustTime(index, -1));
-            row.addView(minus1, new LinearLayout.LayoutParams(dp(38), dp(32)));
-
+            row.addView(minus1, new LinearLayout.LayoutParams(dp(34), dp(28)));
             Button plus1 = tinyButton("+1");
             plus1.setOnClickListener(v -> adjustTime(index, 1));
-            row.addView(plus1, new LinearLayout.LayoutParams(dp(38), dp(32)));
-
+            row.addView(plus1, new LinearLayout.LayoutParams(dp(34), dp(28)));
             Button plus10 = tinyButton("+10");
             plus10.setOnClickListener(v -> adjustTime(index, 10));
-            row.addView(plus10, new LinearLayout.LayoutParams(dp(42), dp(32)));
-
+            row.addView(plus10, new LinearLayout.LayoutParams(dp(38), dp(28)));
             Button delete = tinyButton("删");
             delete.setOnClickListener(v -> removeTime(index));
-            row.addView(delete, new LinearLayout.LayoutParams(dp(38), dp(32)));
+            row.addView(delete, new LinearLayout.LayoutParams(dp(34), dp(28)));
 
             listContainer.addView(row);
         }
+    }
+
+    private void showInputDialog() {
+        final Dialog dialog = new Dialog(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(10), dp(10), dp(10), dp(10));
+        box.setBackgroundColor(Color.argb(238, 35, 35, 35));
+
+        TextView title = new TextView(this);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(12);
+        title.setText("输入：0,1,2,3,4 档位码；或 0,469,980 毫秒列表");
+        box.addView(title);
+
+        EditText input = new EditText(this);
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(Color.LTGRAY);
+        input.setSingleLine(false);
+        input.setMinLines(1);
+        input.setMaxLines(3);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setHint("例如：2,2,2,3,2 或 0,469,980,1915");
+        input.setText(formatTimes(tapTimesMs));
+        box.addView(input, new LinearLayout.LayoutParams(dp(330), dp(82)));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        Button apply = smallButton("应用");
+        Button close = smallButton("关闭");
+        buttons.addView(apply, new LinearLayout.LayoutParams(dp(84), dp(38)));
+        buttons.addView(close, new LinearLayout.LayoutParams(dp(84), dp(38)));
+        box.addView(buttons);
+
+        apply.setOnClickListener(v -> {
+            String text = input.getText() == null ? "" : input.getText().toString();
+            if (applyInputText(text)) dialog.dismiss();
+        });
+        close.setOnClickListener(v -> dialog.dismiss());
+
+        dialog.setContentView(box);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
+        }
+        dialog.setOnShowListener(d -> {
+            try {
+                if (dialog.getWindow() != null) {
+                    dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
+                    dialog.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+                    dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+                }
+                input.requestFocus();
+                InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            } catch (Exception ignored) { }
+        });
+        try {
+            dialog.show();
+            if (dialog.getWindow() != null) dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
+        } catch (Exception e) {
+            setStatus("输入框打开失败：" + e.getClass().getSimpleName());
+        }
+    }
+
+    private boolean applyInputText(String text) {
+        ArrayList<String> tokens = tokenize(text);
+        if (tokens.isEmpty()) {
+            setStatus("输入为空");
+            return false;
+        }
+
+        boolean digitCode = true;
+        for (String s : tokens) {
+            if (s.length() != 1 || s.charAt(0) < '0' || s.charAt(0) > '4') {
+                digitCode = false;
+                break;
+            }
+        }
+
+        if (digitCode) {
+            applyDigitCode(tokens);
+            return true;
+        }
+
+        ArrayList<Long> values = new ArrayList<>();
+        for (String s : tokens) {
+            try {
+                long v = Math.round(Double.parseDouble(s));
+                if (v >= 0L) values.add(v);
+            } catch (Exception ignored) { }
+        }
+        if (values.isEmpty()) {
+            setStatus("无法解析输入；请输入 0-4 档位或毫秒列表");
+            return false;
+        }
+        tapTimesMs.clear();
+        tapTimesMs.addAll(values);
+        Collections.sort(tapTimesMs);
+        saveTimes();
+        refreshList();
+        setStatus("已应用毫秒列表：" + formatTimes(tapTimesMs));
+        return true;
+    }
+
+    private ArrayList<String> tokenize(String text) {
+        ArrayList<String> out = new ArrayList<>();
+        if (text == null) return out;
+        String cleaned = text.trim();
+        if (cleaned.matches("[0-4]+")) {
+            for (int i = 0; i < cleaned.length(); i++) out.add(String.valueOf(cleaned.charAt(i)));
+            return out;
+        }
+        String[] parts = cleaned.split("[^0-9.]+ ");
+        if (parts.length <= 1) parts = cleaned.split("[^0-9.]+");
+        for (String p : parts) if (p != null && !p.trim().isEmpty()) out.add(p.trim());
+        return out;
+    }
+
+    private void applyDigitCode(ArrayList<String> codes) {
+        ArrayList<Long> base = new ArrayList<>();
+        for (long v : DEFAULT_TIMES) base.add(v);
+
+        if (codes.size() == 1) {
+            int code = codes.get(0).charAt(0) - '0';
+            long delta = CODE_OFFSETS[code];
+            for (int i = 1; i < base.size(); i++) base.set(i, Math.max(0L, base.get(i) + delta));
+            setTimesAndSave(base, "已应用全局档位 " + code + "：" + delta + "ms");
+            return;
+        }
+
+        for (int i = 1; i < base.size(); i++) {
+            int codeIndex = Math.min(i - 1, codes.size() - 1);
+            int code = codes.get(codeIndex).charAt(0) - '0';
+            base.set(i, Math.max(0L, base.get(i) + CODE_OFFSETS[code]));
+        }
+        setTimesAndSave(base, "已应用分段档位：" + formatTimes(base));
+    }
+
+    private void setTimesAndSave(ArrayList<Long> values, String status) {
+        tapTimesMs.clear();
+        tapTimesMs.addAll(values);
+        Collections.sort(tapTimesMs);
+        saveTimes();
+        refreshList();
+        setStatus(status);
     }
 
     private void adjustTime(int index, long deltaMs) {
@@ -317,6 +470,14 @@ public class TapAccessibilityService extends AccessibilityService {
         Collections.sort(tapTimesMs);
         saveTimes();
         refreshList();
+    }
+
+    private void adjustAllJumps(long deltaMs) {
+        for (int i = 1; i < tapTimesMs.size(); i++) tapTimesMs.set(i, Math.max(0L, tapTimesMs.get(i) + deltaMs));
+        Collections.sort(tapTimesMs);
+        saveTimes();
+        refreshList();
+        setStatus("全部跳跃 " + (deltaMs > 0 ? "+" : "") + deltaMs + "ms");
     }
 
     private void removeTime(int index) {
@@ -336,14 +497,14 @@ public class TapAccessibilityService extends AccessibilityService {
         recommendedTimesMs.clear();
         lastAnalysisResult = null;
         setApplyEnabled(false);
-        if (analyzeButton != null) analyzeButton.setText("结束分析");
-        setStatus("正在启动前台内部音频捕获...");
+        if (analyzeButton != null) analyzeButton.setText("结束");
+        setStatus("分析开始：请从提示确认点击开始，把确认声和跳跃声都录进去");
         AudioCaptureForegroundService.start(this);
     }
 
     private void finishAudioAnalysis() {
-        if (analyzeButton != null) analyzeButton.setText("分析中...");
-        setStatus("正在结束内部音频并分析...");
+        if (analyzeButton != null) analyzeButton.setText("分析中");
+        setStatus("正在结束内部音频并分析全部咔哒/跳跃...");
         AudioCaptureForegroundService.stop(this);
     }
 
@@ -353,11 +514,8 @@ public class TapAccessibilityService extends AccessibilityService {
         recommendedTimesMs.addAll(result.recommendedTimesMs);
         if (analyzeButton != null) analyzeButton.setText("音频分析");
         setApplyEnabled(!recommendedTimesMs.isEmpty());
-        if (recommendedTimesMs.isEmpty()) {
-            setStatus(result.debugText);
-        } else {
-            setStatus(result.debugText + " | 推荐：" + formatTimes(recommendedTimesMs));
-        }
+        if (recommendedTimesMs.isEmpty()) setStatus(result.debugText);
+        else setStatus(result.debugText + " | 推荐：" + formatTimes(recommendedTimesMs));
     }
 
     private void applyRecommendedTimes() {
@@ -385,7 +543,7 @@ public class TapAccessibilityService extends AccessibilityService {
 
     private String formatTimes(ArrayList<Long> values) {
         StringBuilder sb = new StringBuilder();
-        int limit = Math.min(values.size(), 12);
+        int limit = Math.min(values.size(), 20);
         for (int i = 0; i < limit; i++) {
             if (i > 0) sb.append(',');
             sb.append(values.get(i));
@@ -408,7 +566,6 @@ public class TapAccessibilityService extends AccessibilityService {
         runStartNs = System.nanoTime();
         if (startButton != null) startButton.setText("停止");
         if (statusText != null) statusText.setText("运行中：" + tapTimesMs.size() + " 次点击");
-
         dispatchTapSequenceInChunks();
         scheduleRunLogs();
         long last = tapTimesMs.get(tapTimesMs.size() - 1);
@@ -442,7 +599,6 @@ public class TapAccessibilityService extends AccessibilityService {
     private void dispatchGestureChunk(ArrayList<Long> times, int from, int to, long baseTime) {
         int[] size = getScreenSize();
         GestureDescription.Builder builder = new GestureDescription.Builder();
-
         for (int i = from; i < to; i++) {
             long relativeStart = Math.max(0L, times.get(i) - baseTime);
             float xr = (i == 0) ? PROMPT_X_RATIO : JUMP_X_RATIO;
@@ -451,7 +607,6 @@ public class TapAccessibilityService extends AccessibilityService {
             int y = Math.round(size[1] * yr);
             addTapStroke(builder, x, y, relativeStart, 28L);
         }
-
         dispatchGesture(builder.build(), null, null);
     }
 
@@ -465,7 +620,7 @@ public class TapAccessibilityService extends AccessibilityService {
                 if (!running || statusText == null) return;
                 double actualMs = (System.nanoTime() - runStartNs) / 1_000_000.0;
                 statusText.setText(String.format(Locale.US,
-                        "#%02d 计划 %.3fms | 记录 %.3fms | 偏差 %.3fms",
+                        "#%02d 计划 %.3f | 记录 %.3f | 偏差 %.3f",
                         index + 1, (double) planned, actualMs, actualMs - planned));
             }, planned);
         }
@@ -481,7 +636,6 @@ public class TapAccessibilityService extends AccessibilityService {
         int width;
         int height;
         WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-
         if (Build.VERSION.SDK_INT >= 30) {
             Rect bounds = wm.getCurrentWindowMetrics().getBounds();
             width = bounds.width();
@@ -492,7 +646,6 @@ public class TapAccessibilityService extends AccessibilityService {
             width = metrics.widthPixels;
             height = metrics.heightPixels;
         }
-
         if (height > width) {
             int t = width;
             width = height;
@@ -504,7 +657,7 @@ public class TapAccessibilityService extends AccessibilityService {
     private Button smallButton(String text) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(10);
+        b.setTextSize(9);
         b.setTextColor(Color.WHITE);
         b.setBackgroundColor(Color.argb(215, 80, 80, 80));
         b.setPadding(0, 0, 0, 0);
@@ -513,7 +666,7 @@ public class TapAccessibilityService extends AccessibilityService {
 
     private Button tinyButton(String text) {
         Button b = smallButton(text);
-        b.setTextSize(9);
+        b.setTextSize(8);
         return b;
     }
 
@@ -553,22 +706,15 @@ public class TapAccessibilityService extends AccessibilityService {
             if (i > 0) sb.append(',');
             sb.append(tapTimesMs.get(i));
         }
-        getSharedPreferences(PREF_NAME, MODE_PRIVATE)
-                .edit()
-                .putString(KEY_TIMES, sb.toString())
-                .apply();
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE).edit().putString(KEY_TIMES, sb.toString()).apply();
     }
 
     private void loadPanelMode() {
-        SharedPreferences sp = getSharedPreferences(PREF_NAME, MODE_PRIVATE);
-        compactMode = sp.getBoolean(KEY_COMPACT_MODE, false);
+        compactMode = getSharedPreferences(PREF_NAME, MODE_PRIVATE).getBoolean(KEY_COMPACT_MODE, false);
     }
 
     private void savePanelMode() {
-        getSharedPreferences(PREF_NAME, MODE_PRIVATE)
-                .edit()
-                .putBoolean(KEY_COMPACT_MODE, compactMode)
-                .apply();
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE).edit().putBoolean(KEY_COMPACT_MODE, compactMode).apply();
     }
 
     @Override
