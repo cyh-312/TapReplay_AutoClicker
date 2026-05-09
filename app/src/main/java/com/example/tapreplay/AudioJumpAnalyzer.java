@@ -7,10 +7,10 @@ import java.util.Comparator;
 import java.util.Locale;
 
 /**
- * Lightweight on-device audio event analyzer.
+ * Lightweight fallback audio event analyzer.
  *
- * No network, no model, no heavy dependency. It detects repeated fixed click/jump sounds
- * from internally captured game audio and converts them into tap timing candidates.
+ * The main path now uses PreciseJumpAnalyzer. This class remains as a fallback and
+ * also owns the shared Result data structure used by both analyzers.
  */
 public final class AudioJumpAnalyzer {
     public static final int SAMPLE_RATE = 44100;
@@ -41,9 +41,7 @@ public final class AudioJumpAnalyzer {
             return result;
         }
 
-        for (Candidate candidate : candidates) {
-            candidate.feature = buildFeature(pcm, sampleRate, candidate.sampleIndex);
-        }
+        for (Candidate candidate : candidates) candidate.feature = buildFeature(pcm, sampleRate, candidate.sampleIndex);
 
         ArrayList<Candidate> matched = clusterRepeatedSound(candidates);
         if (matched.isEmpty()) matched.addAll(candidates);
@@ -145,9 +143,7 @@ public final class AudioJumpAnalyzer {
         ArrayList<Candidate> matched = new ArrayList<>();
         if (bestSeed == null) return matched;
         for (Candidate candidate : candidates) {
-            if (cosine(bestSeed.feature, candidate.feature) >= KEEP_SIMILARITY) {
-                matched.add(candidate);
-            }
+            if (cosine(bestSeed.feature, candidate.feature) >= KEEP_SIMILARITY) matched.add(candidate);
         }
         Collections.sort(matched, Comparator.comparingLong(c -> c.timeMs));
         return matched;
@@ -174,16 +170,12 @@ public final class AudioJumpAnalyzer {
             result.anchorFound = true;
             result.anchorSoundMs = anchor.timeMs;
             originMs = Math.max(0L, anchor.timeMs - START_SOUND_DELAY_MS);
-            for (Candidate candidate : matched) {
-                addIfUseful(result.recommendedTimesMs, candidate.timeMs - originMs);
-            }
+            for (Candidate candidate : matched) addIfUseful(result.recommendedTimesMs, candidate.timeMs - originMs);
         } else {
             result.anchorFound = false;
             result.anchorSoundMs = -1L;
             originMs = firstMatchedMs;
-            for (int i = 1; i < matched.size(); i++) {
-                addIfUseful(result.recommendedTimesMs, matched.get(i).timeMs - originMs);
-            }
+            for (int i = 1; i < matched.size(); i++) addIfUseful(result.recommendedTimesMs, matched.get(i).timeMs - originMs);
         }
     }
 
@@ -298,6 +290,8 @@ public final class AudioJumpAnalyzer {
         public final ArrayList<Long> eventTimesMs = new ArrayList<>();
         public final ArrayList<Long> recommendedTimesMs = new ArrayList<>();
         public int candidateCount = 0;
+        public int correlationPeakCount = 0;
+        public double templateScore = 0.0;
         public boolean anchorFound = false;
         public long anchorSoundMs = -1L;
         public String debugText = "";
