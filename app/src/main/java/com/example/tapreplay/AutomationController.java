@@ -39,16 +39,24 @@ public class AutomationController {
 
         TapAccessibilityService service = TapAccessibilityService.getInstance();
         if (service == null) {
-            TapAccessibilityService.setOverlayStatus("请先开启无障碍");
+            TapAccessibilityService.setOverlayStatus("先开启无障碍");
             return;
         }
         if (!ScreenCaptureService.isReady()) {
-            TapAccessibilityService.setOverlayStatus("请先在App里授权屏幕捕获");
+            TapAccessibilityService.setOverlayStatus("先在App里授权屏幕捕获");
+            return;
+        }
+
+        String target = context.getSharedPreferences("douyin_filter", Context.MODE_PRIVATE)
+                .getString("share_target", "").trim();
+        if (target.isEmpty()) {
+            TapAccessibilityService.setOverlayStatus("先在App里填写分享对象");
             return;
         }
 
         running.set(true);
         service.setOverlayRunning(true);
+        TapAccessibilityService.setOverlayStatus("准备开始…");
         worker = new Thread(this::loop, "douyin-automation");
         worker.start();
     }
@@ -56,7 +64,10 @@ public class AutomationController {
     public synchronized void stop() {
         running.set(false);
         TapAccessibilityService service = TapAccessibilityService.getInstance();
-        if (service != null) service.setOverlayRunning(false);
+        if (service != null) {
+            service.setOverlayRunning(false);
+            TapAccessibilityService.setOverlayStatus("已停止");
+        }
     }
 
     public void toggle() {
@@ -67,58 +78,101 @@ public class AutomationController {
         TapAccessibilityService service = TapAccessibilityService.getInstance();
         try {
             ModelEngine engine = ModelEngine.get(context);
-            TapAccessibilityService.setOverlayStatus("加载模型…");
+            TapAccessibilityService.setOverlayStatus("正在加载识别模型…");
+            long modelStart = System.currentTimeMillis();
             engine.ensureLoaded();
+            long modelMs = System.currentTimeMillis() - modelStart;
+            TapAccessibilityService.setOverlayStatus("模型好了｜" + engine.getBackendNote() + "｜" + formatMs(modelMs));
 
             int cycle = 0;
             while (running.get()) {
                 cycle++;
+                long cycleStart = System.currentTimeMillis();
                 service = TapAccessibilityService.getInstance();
-                if (service == null) throw new IllegalStateException("无障碍服务已断开");
+                if (service == null) throw new IllegalStateException("无障碍服务断开了");
 
-                TapAccessibilityService.setOverlayStatus("第" + cycle + "条：上滑");
+                TapAccessibilityService.setOverlayStatus("第" + cycle + "条｜正在切到下一条…");
                 if (!service.swipeNextVideo()) throw new RuntimeException("上滑失败");
                 sleepInterruptible(AFTER_SWIPE_MS);
                 if (!running.get()) break;
 
+                TapAccessibilityService.setOverlayStatus("第" + cycle + "条｜正在取画面…");
+                long captureStart = System.currentTimeMillis();
                 List<ModelEngine.FrameData> frames = captureFrames(engine);
+                long captureMs = System.currentTimeMillis() - captureStart;
+                int sampled = frames.size();
+
                 if (frames.size() < 2) {
                     recycle(frames);
-                    TapAccessibilityService.setOverlayStatus("采样不足，继续");
+                    TapAccessibilityService.setOverlayStatus(
+                            "第" + cycle + "条｜画面没采够，先跳过｜" + formatMs(captureMs));
                     continue;
                 }
 
-                TapAccessibilityService.setOverlayStatus("分析 " + frames.size() + " 帧…");
+                TapAccessibilityService.setOverlayStatus(
+                        "第" + cycle + "条｜已取" + sampled + "帧，正在判断…");
+
                 ModelEngine.Decision decision;
+                long analyzeStart = System.currentTimeMillis();
                 try {
                     decision = engine.analyze(frames);
                 } finally {
                     recycle(frames);
                 }
+                long analyzeMs = System.currentTimeMillis() - analyzeStart;
 
+                String friendly = friendlyResult(decision);
+                String detail = sampled + "帧｜女生" + decision.femaleFrames + "/" + decision.checkedFrames +
+                        "｜最高" + String.format(Locale.US, "%.2f", decision.maxSensual) +
+                        "｜" + formatMs(captureMs + analyzeMs);
                 TapAccessibilityService.setOverlayStatus(
-                        decision.state + " " + decision.path +
-                        String.format(Locale.US, "\nTopK %.3f / Max %.3f", decision.topkMean, decision.maxSensual));
+                        "第" + cycle + "条｜" + friendly + "\n" + detail);
 
                 if (decision.isPositive() && running.get()) {
                     String target = context.getSharedPreferences("douyin_filter", Context.MODE_PRIVATE)
-                            .getString("share_target", "老张分享");
-                    boolean ok = service.shareToTarget(target, running);
-                    if (!ok && running.get()) {
-                        TapAccessibilityService.setOverlayStatus("分享失败，已安全停止");
+                            .getString("share_target", "").trim();
+                    if (target.isEmpty()) {
+                        TapAccessibilityService.setOverlayStatus("分享对象没设置，已停下");
                         running.set(false);
                         break;
+                    }
+
+                    TapAccessibilityService.setOverlayStatus(
+                            "第" + cycle + "条｜符合，正在找分享对象…");
+                    long shareStart = System.currentTimeMillis();
+                    boolean ok = service.shareToTarget(target, running);
+                    long shareMs = System.currentTimeMillis() - shareStart;
+                    if (!ok && running.get()) {
+                        TapAccessibilityService.setOverlayStatus("分享没成功，为安全起见已停下");
+                        running.set(false);
+                        break;
+                    }
+                    if (ok && running.get()) {
+                        long totalMs = System.currentTimeMillis() - cycleStart;
+                        TapAccessibilityService.setOverlayStatus(
+                                "第" + cycle + "条｜已分享 ✓\n整轮" + formatMs(totalMs) + "｜分享" + formatMs(shareMs));
                     }
                 }
 
                 sleepInterruptible(BETWEEN_CYCLES_MS);
             }
         } catch (Throwable e) {
-            TapAccessibilityService.setOverlayStatus("停止：" + shortError(e));
+            TapAccessibilityService.setOverlayStatus("停下了｜" + shortError(e));
         } finally {
             running.set(false);
             TapAccessibilityService s = TapAccessibilityService.getInstance();
             if (s != null) s.setOverlayRunning(false);
+        }
+    }
+
+    private String friendlyResult(ModelEngine.Decision d) {
+        if (d == null) return "没判断出来，先跳过";
+        switch (d.state) {
+            case "positive": return "符合，准备分享";
+            case "border": return "有点像，先跳过";
+            case "negative": return "不符合，跳过";
+            case "insufficient": return "画面没采够，先跳过";
+            default: return "没判断出来，先跳过";
         }
     }
 
@@ -127,7 +181,7 @@ public class AutomationController {
         long started = System.currentTimeMillis();
         long next = started;
         ScreenCaptureService cap = ScreenCaptureService.getInstance();
-        if (cap == null) throw new IllegalStateException("屏幕捕获服务未就绪");
+        if (cap == null) throw new IllegalStateException("屏幕捕获还没准备好");
 
         while (running.get() && out.size() < MAX_FRAMES) {
             long elapsed = System.currentTimeMillis() - started;
@@ -142,7 +196,7 @@ public class AutomationController {
                 full = cap.captureLatest(1200);
                 out.add(engine.prepareFrame(full));
             } catch (Throwable e) {
-                // 单帧失败不终止整轮
+                // 单张画面偶尔失败不影响整轮，继续取下一张。
             } finally {
                 if (full != null && !full.isRecycled()) full.recycle();
             }
@@ -166,10 +220,15 @@ public class AutomationController {
         }
     }
 
+    private String formatMs(long ms) {
+        if (ms < 1000) return ms + "ms";
+        return String.format(Locale.US, "%.1fs", ms / 1000.0);
+    }
+
     private String shortError(Throwable e) {
         String s = e.getMessage();
         if (s == null || s.trim().isEmpty()) s = e.getClass().getSimpleName();
-        if (s.length() > 80) s = s.substring(0, 80);
+        if (s.length() > 70) s = s.substring(0, 70);
         return s;
     }
 }
