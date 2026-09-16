@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: douyin-filter-android
@@ -58,13 +58,29 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon
 
-      - name: Show APK
-        run: ls -lh app/build/outputs/apk/debug/
+      - name: Prepare named APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.3.apk
+          ls -lh DouyinFilter-v0.3.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: DouyinFilter-v0.3-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: DouyinFilter-v0.3.apk
           compression-level: 0
           retention-days: 30
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: douyin-filter-v0.3.0
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" DouyinFilter-v0.3.apk --clobber
+          else
+            gh release create "$TAG" DouyinFilter-v0.3.apk \
+              --target "$GITHUB_SHA" \
+              --title "DouyinFilter Android V0.3" \
+              --notes "V0.3：加强分享按钮与分享面板识别；增加分享重试；检测并自动收起误弹出的键盘；保留原有 SigLIP2 + CLIP FP16 判断规则。"
+          fi
