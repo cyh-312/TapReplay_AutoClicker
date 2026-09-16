@@ -140,7 +140,7 @@ public class AutomationController {
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜符合，准备打开分享…");
                     long shareStart = System.currentTimeMillis();
-                    boolean ok = ShareFlowV2.shareToTarget(service, target, running);
+                    boolean ok = ShareFlowV3.shareToTarget(service, target, running);
                     long shareMs = System.currentTimeMillis() - shareStart;
                     if (!ok && running.get()) {
                         TapAccessibilityService.setOverlayStatus("分享没成功，为安全起见已停下");
