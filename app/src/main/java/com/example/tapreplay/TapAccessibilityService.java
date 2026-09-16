@@ -8,6 +8,7 @@ import android.graphics.Rect;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.view.*;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -69,24 +70,29 @@ public class TapAccessibilityService extends AccessibilityService {
         wm = (WindowManager)getSystemService(WINDOW_SERVICE);
 
         overlay = new LinearLayout(this);
-        overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setPadding(dp(8), dp(6), dp(8), dp(6));
-        overlay.setBackgroundColor(Color.argb(190, 20, 20, 20));
+        overlay.setOrientation(LinearLayout.HORIZONTAL);
+        overlay.setGravity(Gravity.CENTER_VERTICAL);
+        overlay.setPadding(dp(5), dp(4), dp(6), dp(4));
+        overlay.setBackgroundColor(Color.argb(188, 18, 18, 18));
 
         button = new TextView(this);
         button.setText("开始");
         button.setTextColor(Color.WHITE);
-        button.setTextSize(16);
+        button.setTextSize(13);
         button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(12), dp(8), dp(12), dp(8));
-        overlay.addView(button, new LinearLayout.LayoutParams(dp(86), dp(44)));
+        button.setPadding(dp(5), dp(4), dp(5), dp(4));
+        overlay.addView(button, new LinearLayout.LayoutParams(dp(58), dp(38)));
 
         status = new TextView(this);
         status.setText("就绪");
         status.setTextColor(Color.WHITE);
-        status.setTextSize(11);
-        status.setMaxWidth(dp(180));
-        overlay.addView(status);
+        status.setTextSize(10);
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        status.setPadding(dp(7), 0, dp(3), 0);
+        status.setMaxLines(2);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(dp(205), dp(42));
+        overlay.addView(status, statusLp);
 
         params = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -96,8 +102,8 @@ public class TapAccessibilityService extends AccessibilityService {
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
-        params.x = dp(12);
-        params.y = dp(180);
+        params.x = dp(10);
+        params.y = dp(170);
 
         final float[] downRaw = new float[2];
         final int[] downXY = new int[2];
@@ -157,6 +163,7 @@ public class TapAccessibilityService extends AccessibilityService {
         if (!isSharePanelOpen(root)) {
             AccessibilityNodeInfo share = findShareButton(root);
             if (share == null) return false;
+            setOverlayStatus("找到符合的视频｜正在打开分享…");
             clickNode(share);
             share.recycle();
             if (!waitSharePanel(true, 3000, running)) return false;
@@ -173,10 +180,12 @@ public class TapAccessibilityService extends AccessibilityService {
             List<AccessibilityNodeInfo> matches = findTargetContacts(root, target);
             if (matches.size() > 1) {
                 recycleNodes(matches);
+                setOverlayStatus("找到多个同名联系人，已停下");
                 return false;
             }
             if (matches.size() == 1) {
                 AccessibilityNodeInfo node = matches.get(0);
+                setOverlayStatus("找到分享对象｜正在确认…");
                 SystemClock.sleep(250);
                 if (!running.get()) {
                     node.recycle();
@@ -203,6 +212,7 @@ public class TapAccessibilityService extends AccessibilityService {
                     return false;
                 }
 
+                setOverlayStatus("联系人选好了｜正在找发送按钮…");
                 PointHit send = detectSendButton();
                 if (send == null) return false;
                 if (!running.get()) {
@@ -211,7 +221,7 @@ public class TapAccessibilityService extends AccessibilityService {
                 }
                 if (!tap(send.x, send.y)) return false;
 
-                setOverlayStatus("已点发送，等待面板关闭…");
+                setOverlayStatus("已点发送｜等页面收好…");
                 long end = SystemClock.uptimeMillis() + 5500;
                 while (SystemClock.uptimeMillis() < end) {
                     if (waitSharePanel(false, 450, null)) {
@@ -227,6 +237,7 @@ public class TapAccessibilityService extends AccessibilityService {
             Rect b = new Rect();
             recycler.getBoundsInScreen(b);
             recycler.recycle();
+            setOverlayStatus("没看到分享对象｜在联系人栏继续找…");
             int y = b.centerY();
             boolean swiped = gestureLine(
                     Math.max(b.left + 20, b.right - (b.width() * 0.16f)),
