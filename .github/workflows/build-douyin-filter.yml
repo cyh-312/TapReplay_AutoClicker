@@ -1,0 +1,70 @@
+name: Build Douyin Filter APK
+
+on:
+  push:
+    branches: [ douyin-filter-android ]
+    paths-ignore:
+      - 'apk/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: douyin-filter-android
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-douyin-filter-v2
+
+      - name: Install model export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==4.50.0 huggingface_hub onnx==1.17.0 onnxruntime==1.29.0
+
+      - name: Export corrected FP16 ONNX models
+        run: |
+          mkdir -p app/src/main/assets/models
+          python tools/export_models.py app/src/main/assets/models
+          ls -lh app/src/main/assets/models
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Show APK
+        run: ls -lh app/build/outputs/apk/debug/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouyinFilter-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          compression-level: 0
+          retention-days: 30
