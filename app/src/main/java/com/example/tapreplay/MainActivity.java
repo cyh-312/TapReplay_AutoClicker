@@ -9,6 +9,9 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -41,7 +44,7 @@ public class MainActivity extends Activity {
         scroll.addView(box);
 
         TextView title = new TextView(this);
-        title.setText("抖音筛选分享 · Android V0.2");
+        title.setText("抖音筛选分享 · Android V0.3");
         title.setTextSize(22);
         box.addView(title);
 
@@ -56,20 +59,20 @@ public class MainActivity extends Activity {
         targetEdit = new EditText(this);
         targetEdit.setHint("分享对象昵称（必须精确填写）");
         targetEdit.setSingleLine(true);
+        targetEdit.setImeOptions(EditorInfo.IME_ACTION_DONE);
         targetEdit.setText(prefs.getString("share_target", ""));
+        targetEdit.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                saveTargetAndHideKeyboard();
+                return true;
+            }
+            return false;
+        });
         box.addView(targetEdit, match());
 
         Button save = new Button(this);
         save.setText("保存分享对象");
-        save.setOnClickListener(v -> {
-            String t = targetEdit.getText().toString().trim();
-            prefs.edit().putString("share_target", t).apply();
-            if (t.isEmpty()) {
-                Toast.makeText(this, "已清空。开始前需要先填写分享对象。", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "已保存：" + t, Toast.LENGTH_SHORT).show();
-            }
-        });
+        save.setOnClickListener(v -> saveTargetAndHideKeyboard());
         box.addView(save, match());
 
         nnapiCheck = new CheckBox(this);
@@ -86,23 +89,33 @@ public class MainActivity extends Activity {
 
         Button accessibility = new Button(this);
         accessibility.setText("1. 开启无障碍服务");
-        accessibility.setOnClickListener(v ->
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        accessibility.setOnClickListener(v -> {
+            hideKeyboard();
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        });
         box.addView(accessibility, match());
 
         Button capture = new Button(this);
         capture.setText("2. 授权屏幕捕获");
-        capture.setOnClickListener(v -> requestCapture());
+        capture.setOnClickListener(v -> {
+            hideKeyboard();
+            requestCapture();
+        });
         box.addView(capture, match());
 
         Button load = new Button(this);
         load.setText("3. 加载识别模型");
-        load.setOnClickListener(v -> preloadModels());
+        load.setOnClickListener(v -> {
+            hideKeyboard();
+            preloadModels();
+        });
         box.addView(load, match());
 
         Button openDouyin = new Button(this);
         openDouyin.setText("4. 打开抖音");
         openDouyin.setOnClickListener(v -> {
+            hideKeyboard();
+            targetEdit.clearFocus();
             Intent i = getPackageManager().getLaunchIntentForPackage("com.ss.android.ugc.aweme");
             if (i == null) {
                 Toast.makeText(this, "没有找到抖音应用", Toast.LENGTH_LONG).show();
@@ -122,7 +135,9 @@ public class MainActivity extends Activity {
                 "说明：\n" +
                 "• 悬浮条左边是开始/停止，右边会显示当前进度和判断结果。\n" +
                 "• 只有判断为“符合”的视频才会尝试分享。\n" +
-                "• 分享对象必须精确匹配；遇到同名、找不到或页面不确定时会直接停下。\n" +
+                "• 分享按钮会重新确认并最多尝试 3 次，不再一次没点开就直接失败。\n" +
+                "• 如果键盘意外弹出，会先自动收起，再继续找分享和发送按钮。\n" +
+                "• 分享对象必须精确匹配；遇到同名或页面不确定时不会乱点。\n" +
                 "• “某联系人分享给你”等视频页提示不会被当成分享面板。\n" +
                 "• 横向找联系人只会在真正的分享联系人列表里进行。\n" +
                 "• 屏幕尺寸按当前手机自动读取，不固定某一种分辨率。\n" +
@@ -133,6 +148,30 @@ public class MainActivity extends Activity {
         setContentView(scroll);
         requestNotificationPermission();
         preloadModels();
+    }
+
+    private void saveTargetAndHideKeyboard() {
+        String t = targetEdit.getText().toString().trim();
+        prefs.edit().putString("share_target", t).apply();
+        targetEdit.clearFocus();
+        hideKeyboard();
+        if (t.isEmpty()) {
+            Toast.makeText(this, "已清空。开始前需要先填写分享对象。", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "已保存：" + t, Toast.LENGTH_SHORT).show();
+        }
+        refreshStatus();
+    }
+
+    private void hideKeyboard() {
+        try {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            View v = getCurrentFocus();
+            if (v == null) v = targetEdit;
+            if (imm != null && v != null) {
+                imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) {}
     }
 
     @Override
