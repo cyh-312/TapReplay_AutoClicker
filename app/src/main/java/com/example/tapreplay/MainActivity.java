@@ -44,7 +44,7 @@ public class MainActivity extends Activity {
         scroll.addView(box);
 
         TextView title = new TextView(this);
-        title.setText("抖音筛选分享 · Android V0.3");
+        title.setText("抖音筛选分享 · Android V0.4");
         title.setTextSize(22);
         box.addView(title);
 
@@ -135,10 +135,10 @@ public class MainActivity extends Activity {
                 "说明：\n" +
                 "• 悬浮条左边是开始/停止，右边会显示当前进度和判断结果。\n" +
                 "• 只有判断为“符合”的视频才会尝试分享。\n" +
-                "• 分享按钮会重新确认并最多尝试 3 次，不再一次没点开就直接失败。\n" +
-                "• 如果键盘意外弹出，会先自动收起，再继续找分享和发送按钮。\n" +
+                "• 只认右侧操作栏里的真正分享按钮，不会把“分享此刻想法”当成分享。\n" +
+                "• 点击后必须确认分享栏真的打开，失败会重试，不会直接继续乱点。\n" +
+                "• 如果键盘意外弹出，会先自动收起，再继续。\n" +
                 "• 分享对象必须精确匹配；遇到同名或页面不确定时不会乱点。\n" +
-                "• “某联系人分享给你”等视频页提示不会被当成分享面板。\n" +
                 "• 横向找联系人只会在真正的分享联系人列表里进行。\n" +
                 "• 屏幕尺寸按当前手机自动读取，不固定某一种分辨率。\n" +
                 "• 运行中点“停止”，在发送前会取消后续操作。\n");
