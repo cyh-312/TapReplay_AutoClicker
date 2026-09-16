@@ -41,40 +41,46 @@ public class MainActivity extends Activity {
         scroll.addView(box);
 
         TextView title = new TextView(this);
-        title.setText("抖音自动分析分享 · Android V0.1");
+        title.setText("抖音筛选分享 · Android V0.2");
         title.setTextSize(22);
         box.addView(title);
 
         TextView desc = new TextView(this);
         desc.setText(
-                "\n模型：SigLIP2 FP16 + CLIP FP16\n" +
-                "运行：MediaProjection 内存采帧 + AccessibilityService\n" +
-                "不保存截图、CSV、检测历史或分享历史。\n\n" +
-                "首次使用按下面顺序授权，然后打开抖音，使用悬浮按钮“开始”。");
+                "\n本地识别视频画面，符合条件时再分享给你指定的人。\n" +
+                "画面只在内存里处理，不保存截图、检测记录或分享记录。\n\n" +
+                "第一次使用：先填写分享对象，再依次开启无障碍、屏幕捕获和模型。\n");
         desc.setTextSize(15);
         box.addView(desc);
 
         targetEdit = new EditText(this);
-        targetEdit.setHint("分享目标");
-        targetEdit.setText(prefs.getString("share_target", "老张分享"));
+        targetEdit.setHint("分享对象昵称（必须精确填写）");
+        targetEdit.setSingleLine(true);
+        targetEdit.setText(prefs.getString("share_target", ""));
         box.addView(targetEdit, match());
 
         Button save = new Button(this);
-        save.setText("保存分享目标");
+        save.setText("保存分享对象");
         save.setOnClickListener(v -> {
             String t = targetEdit.getText().toString().trim();
-            if (t.isEmpty()) t = "老张分享";
             prefs.edit().putString("share_target", t).apply();
-            Toast.makeText(this, "已保存：" + t, Toast.LENGTH_SHORT).show();
+            if (t.isEmpty()) {
+                Toast.makeText(this, "已清空。开始前需要先填写分享对象。", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "已保存：" + t, Toast.LENGTH_SHORT).show();
+            }
         });
         box.addView(save, match());
 
         nnapiCheck = new CheckBox(this);
-        nnapiCheck.setText("优先使用 NNAPI（实验；默认关闭，先以准确率为准）");
+        nnapiCheck.setText("NNAPI 硬件加速（试验功能，默认关闭）");
         nnapiCheck.setChecked(prefs.getBoolean("prefer_nnapi", false));
         nnapiCheck.setOnCheckedChangeListener((buttonView, isChecked) -> {
             prefs.edit().putBoolean("prefer_nnapi", isChecked).apply();
             ModelEngine.get(this).reset();
+            Toast.makeText(this,
+                    isChecked ? "已打开试验加速，下次加载模型时生效" : "已切回 CPU 模式",
+                    Toast.LENGTH_SHORT).show();
         });
         box.addView(nnapiCheck, match());
 
@@ -90,7 +96,7 @@ public class MainActivity extends Activity {
         box.addView(capture, match());
 
         Button load = new Button(this);
-        load.setText("3. 预加载模型");
+        load.setText("3. 加载识别模型");
         load.setOnClickListener(v -> preloadModels());
         box.addView(load, match());
 
@@ -99,7 +105,7 @@ public class MainActivity extends Activity {
         openDouyin.setOnClickListener(v -> {
             Intent i = getPackageManager().getLaunchIntentForPackage("com.ss.android.ugc.aweme");
             if (i == null) {
-                Toast.makeText(this, "未找到抖音包 com.ss.android.ugc.aweme", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "没有找到抖音应用", Toast.LENGTH_LONG).show();
             } else {
                 startActivity(i);
             }
@@ -108,17 +114,20 @@ public class MainActivity extends Activity {
 
         statusView = new TextView(this);
         statusView.setTextSize(14);
-        statusView.setPadding(0, dp(18), 0, dp(18));
+        statusView.setPadding(0, dp(18), 0, dp(12));
         box.addView(statusView, match());
 
         TextView note = new TextView(this);
         note.setText(
                 "说明：\n" +
-                "• 悬浮按钮由无障碍服务创建，不需要单独的“悬浮窗权限”。\n" +
-                "• 只有 positive 才会尝试分享。\n" +
-                "• “老张分享 分享给你”等主视频页提示不会被当成分享面板。\n" +
-                "• 横向寻找联系人只允许在真实分享联系人列表内部发生。\n" +
-                "• 运行中点“停止”，发送前会取消后续操作。");
+                "• 悬浮条左边是开始/停止，右边会显示当前进度和判断结果。\n" +
+                "• 只有判断为“符合”的视频才会尝试分享。\n" +
+                "• 分享对象必须精确匹配；遇到同名、找不到或页面不确定时会直接停下。\n" +
+                "• “某联系人分享给你”等视频页提示不会被当成分享面板。\n" +
+                "• 横向找联系人只会在真正的分享联系人列表里进行。\n" +
+                "• 屏幕尺寸按当前手机自动读取，不固定某一种分辨率。\n" +
+                "• 运行中点“停止”，在发送前会取消后续操作。\n");
+        note.setTextSize(13);
         box.addView(note, match());
 
         setContentView(scroll);
@@ -150,7 +159,7 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_CAPTURE) {
             if (resultCode != RESULT_OK || data == null) {
-                Toast.makeText(this, "屏幕捕获未授权", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "没有取得屏幕捕获权限", Toast.LENGTH_SHORT).show();
                 return;
             }
             Intent service = new Intent(this, ScreenCaptureService.class);
@@ -159,12 +168,12 @@ public class MainActivity extends Activity {
             service.putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data);
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
             else startService(service);
-            Toast.makeText(this, "正在启动内存屏幕捕获", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "屏幕捕获已启动，只在内存中使用画面", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void preloadModels() {
-        if (statusView != null) statusView.setText("状态：正在加载两个 FP16 模型……");
+        if (statusView != null) statusView.setText("状态：正在加载识别模型……");
         new Thread(() -> {
             try {
                 ModelEngine.get(this).ensureLoaded();
@@ -185,12 +194,14 @@ public class MainActivity extends Activity {
         boolean acc = TapAccessibilityService.getInstance() != null;
         boolean cap = ScreenCaptureService.isReady();
         boolean model = ModelEngine.get(this).isLoaded();
+        String target = prefs.getString("share_target", "").trim();
         statusView.setText(
                 "当前状态：\n" +
-                "无障碍：" + (acc ? "已连接" : "未连接") + "\n" +
-                "屏幕捕获：" + (cap ? "已就绪" : "未授权/未就绪") + "\n" +
+                "分享对象：" + (target.isEmpty() ? "未设置" : target) + "\n" +
+                "无障碍：" + (acc ? "已开启" : "未开启") + "\n" +
+                "屏幕捕获：" + (cap ? "已就绪" : "未就绪") + "\n" +
                 "模型：" + (model ? "已加载" : "未加载") + "\n" +
-                "推理后端：" + ModelEngine.get(this).getBackendNote());
+                "运行方式：" + ModelEngine.get(this).getBackendNote());
     }
 
     private LinearLayout.LayoutParams match() {
