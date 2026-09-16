@@ -7,11 +7,13 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.os.Build;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.view.*;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.TextView;
 import android.widget.LinearLayout;
 import java.util.*;
@@ -143,6 +145,9 @@ public class TapAccessibilityService extends AccessibilityService {
     }
 
     public boolean swipeNextVideo() {
+        // 键盘如果意外留在屏幕上，先收起来，避免上滑/点击落到键盘上。
+        if (!dismissKeyboardIfVisible(null)) return false;
+
         int w = getResources().getDisplayMetrics().widthPixels;
         int h = getResources().getDisplayMetrics().heightPixels;
         Random r = new Random();
@@ -157,23 +162,63 @@ public class TapAccessibilityService extends AccessibilityService {
     public boolean shareToTarget(String target, AtomicBoolean running) throws Exception {
         if (!running.get()) return false;
 
+        if (!dismissKeyboardIfVisible(running)) return false;
+
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return false;
 
+        // 分享按钮偶尔会因为页面刚刷新、键盘残留、节点树更新慢而第一次没点开。
+        // 这里最多重新读取页面并尝试 3 次，每次都重新找节点，不复用旧节点。
         if (!isSharePanelOpen(root)) {
-            AccessibilityNodeInfo share = findShareButton(root);
-            if (share == null) return false;
-            setOverlayStatus("找到符合的视频｜正在打开分享…");
-            clickNode(share);
-            share.recycle();
-            if (!waitSharePanel(true, 3000, running)) return false;
+            boolean opened = false;
+            for (int attempt = 1; attempt <= 3 && running.get(); attempt++) {
+                dismissKeyboardIfVisible(running);
+                root = getRootInActiveWindow();
+                if (root == null) {
+                    SystemClock.sleep(220);
+                    continue;
+                }
+
+                AccessibilityNodeInfo share = findShareButton(root);
+                if (share == null) {
+                    setOverlayStatus("没找到分享按钮｜再看一次 " + attempt + "/3");
+                    SystemClock.sleep(280);
+                    continue;
+                }
+
+                setOverlayStatus("找到分享按钮｜正在打开 " + attempt + "/3");
+                boolean clicked = clickNode(share);
+                share.recycle();
+                if (!clicked) {
+                    SystemClock.sleep(220);
+                    continue;
+                }
+
+                if (waitSharePanel(true, 1800, running)) {
+                    opened = true;
+                    break;
+                }
+
+                // 某些页面会误把焦点给搜索框/输入框，导致键盘弹出。
+                // 只在明确检测到输入法窗口时按返回，避免误关分享面板。
+                dismissKeyboardIfVisible(running);
+                SystemClock.sleep(250);
+            }
+            if (!opened) {
+                setOverlayStatus("分享面板没打开｜已停下避免乱点");
+                return false;
+            }
         }
+
+        if (!dismissKeyboardIfVisible(running)) return false;
         if (!running.get()) {
             performGlobalAction(GLOBAL_ACTION_BACK);
             return false;
         }
 
         for (int page = 0; page < 6 && running.get(); page++) {
+            if (!dismissKeyboardIfVisible(running)) return false;
+
             root = getRootInActiveWindow();
             if (root == null || !isSharePanelOpen(root)) return false;
 
@@ -202,18 +247,31 @@ public class TapAccessibilityService extends AccessibilityService {
                     return false;
                 }
                 AccessibilityNodeInfo confirmed = verify.get(0);
-                clickNode(confirmed);
+                boolean selected = clickNode(confirmed);
                 node.recycle();
                 confirmed.recycle();
-                SystemClock.sleep(700);
+                if (!selected) return false;
+                SystemClock.sleep(650);
 
                 if (!running.get()) {
                     performGlobalAction(GLOBAL_ACTION_BACK);
                     return false;
                 }
 
+                // 如果选择联系人后抖音意外让搜索框获得焦点，先把键盘收掉，
+                // 再找发送按钮，避免后续点击打到键盘按键上。
+                if (!dismissKeyboardIfVisible(running)) return false;
+                SystemClock.sleep(180);
+
                 setOverlayStatus("联系人选好了｜正在找发送按钮…");
-                PointHit send = detectSendButton();
+                PointHit send = null;
+                for (int i = 1; i <= 3 && running.get(); i++) {
+                    send = detectSendButton();
+                    if (send != null) break;
+                    setOverlayStatus("发送按钮还没出来｜再等一下 " + i + "/3");
+                    dismissKeyboardIfVisible(running);
+                    SystemClock.sleep(280);
+                }
                 if (send == null) return false;
                 if (!running.get()) {
                     performGlobalAction(GLOBAL_ACTION_BACK);
@@ -237,7 +295,7 @@ public class TapAccessibilityService extends AccessibilityService {
             Rect b = new Rect();
             recycler.getBoundsInScreen(b);
             recycler.recycle();
-            setOverlayStatus("没看到分享对象｜在联系人栏继续找…");
+            setOverlayStatus("没看到分享对象｜在联系人栏继续找 " + (page + 1) + "/6");
             int y = b.centerY();
             boolean swiped = gestureLine(
                     Math.max(b.left + 20, b.right - (b.width() * 0.16f)),
@@ -246,9 +304,38 @@ public class TapAccessibilityService extends AccessibilityService {
                     y,
                     360);
             if (!swiped) return false;
-            SystemClock.sleep(450);
+            SystemClock.sleep(500);
         }
         return false;
+    }
+
+    private boolean isKeyboardVisible() {
+        if (Build.VERSION.SDK_INT < 21) return false;
+        try {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null) return false;
+            for (AccessibilityWindowInfo w : windows) {
+                if (w != null && w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean dismissKeyboardIfVisible(AtomicBoolean running) {
+        for (int i = 0; i < 2; i++) {
+            if (!isKeyboardVisible()) return true;
+            if (running != null && !running.get()) return false;
+            setOverlayStatus("键盘弹出来了｜正在收起…");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            SystemClock.sleep(260);
+        }
+        if (isKeyboardVisible()) {
+            setOverlayStatus("键盘一直没收起｜已停下避免乱点");
+            return false;
+        }
+        return true;
     }
 
     private AccessibilityNodeInfo findShareButton(AccessibilityNodeInfo root) {
@@ -262,26 +349,43 @@ public class TapAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo n = q.removeFirst();
             String text = text(n.getText());
             String desc = text(n.getContentDescription());
-            String label = text + " " + desc;
-            if (label.contains("分享") &&
-                    !normalize(text).contains("分享给你") &&
-                    !normalize(desc).contains("分享给你") &&
-                    !normalize(text).startsWith("私信") &&
-                    !normalize(desc).startsWith("私信")) {
-                Rect b = new Rect(); n.getBoundsInScreen(b);
+            String nt = normalize(text), nd = normalize(desc);
+            String cls = text(n.getClassName()).toLowerCase(Locale.ROOT);
+            Rect b = new Rect();
+            n.getBoundsInScreen(b);
+
+            boolean looksLikeShare =
+                    "分享".equals(nt) ||
+                    "分享".equals(nd) ||
+                    (nd.startsWith("分享") && nd.contains("按钮"));
+
+            boolean forbidden =
+                    nt.contains("分享给你") || nd.contains("分享给你") ||
+                    nt.startsWith("私信") || nd.startsWith("私信") ||
+                    cls.contains("edittext") ||
+                    !n.isEnabled() || !n.isVisibleToUser() ||
+                    b.width() <= 0 || b.height() <= 0;
+
+            // 抖音视频页的分享按钮在右侧操作栏。把候选限制在右侧，
+            // 可以避免误点文案、评论输入框、搜索框等带“分享”文字的节点。
+            boolean inRightActionArea =
+                    b.centerX() >= w * 0.62 &&
+                    b.centerY() >= h * 0.12 &&
+                    b.centerY() <= h * 0.92;
+
+            if (looksLikeShare && !forbidden && inRightActionArea) {
                 int score = 0;
-                String nt = normalize(text), nd = normalize(desc);
+                if (nd.startsWith("分享") && nd.contains("按钮")) score += 180;
                 if ("分享".equals(nt) || "分享".equals(nd)) score += 100;
-                if (nd.startsWith("分享") && nd.contains("按钮")) score += 80;
-                if (b.centerX() >= w * 0.70) score += 30;
-                if (b.centerY() <= h * 0.90) score += 10;
-                if (n.isClickable()) score += 5;
+                if (b.centerX() >= w * 0.78) score += 40;
+                if (n.isClickable()) score += 15;
                 if (score > bestScore) {
                     if (best != null) best.recycle();
                     best = AccessibilityNodeInfo.obtain(n);
                     bestScore = score;
                 }
             }
+
             for (int i = 0; i < n.getChildCount(); i++) {
                 AccessibilityNodeInfo c = n.getChild(i);
                 if (c != null) q.add(c);
@@ -361,7 +465,8 @@ public class TapAccessibilityService extends AccessibilityService {
         q.add(AccessibilityNodeInfo.obtain(root));
         while (!q.isEmpty()) {
             AccessibilityNodeInfo n = q.removeFirst();
-            if (n.isEnabled() && n.isClickable()) {
+            String cls = text(n.getClassName()).toLowerCase(Locale.ROOT);
+            if (n.isEnabled() && n.isVisibleToUser() && n.isClickable() && !cls.contains("edittext")) {
                 Rect b = new Rect(); n.getBoundsInScreen(b);
                 if (b.top >= h * 0.60 && b.top <= h * 0.92) {
                     String tx = normalize(text(n.getText()));
