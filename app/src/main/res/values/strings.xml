@@ -1,5 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">TapReplay</string>
-    <string name="accessibility_service_label">TapReplay 自动点击服务</string>
-    <string name="accessibility_service_description">显示悬浮按钮，并按预设毫秒序列执行屏幕点击。</string>
+    <string name="app_name">抖音筛选分享</string>
+    <string name="accessibility_description">用于读取抖音界面节点、执行点击和滑动手势。不会读取通讯录，不保存截图或运行历史。</string>
 </resources>
