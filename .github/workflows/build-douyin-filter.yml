@@ -1,17 +1,15 @@
-name: Build Douyin Filter APK
+name: Internal Douyin Filter Stability Build
 
 on:
   push:
-    branches: [ douyin-filter-android ]
-    paths-ignore:
-      - 'apk/**'
+    branches: [ internal-v0.7.6-stability ]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: douyin-filter-android
+  group: internal-v0.7.6-stability
   cancel-in-progress: true
 
 jobs:
@@ -23,24 +21,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify v0.7.5 robust share/recovery invariants
+      - name: Verify frozen recognition rules and internal stability changes
         shell: bash
         run: |
           set -euo pipefail
-          FLOW7='app/src/main/java/com/example/tapreplay/ShareFlowV7.java'
-          FLOW8='app/src/main/java/com/example/tapreplay/ShareFlowV8.java'
           CTRL='app/src/main/java/com/example/tapreplay/AutomationController.java'
           MODEL='app/src/main/java/com/example/tapreplay/ModelEngine.java'
-          UI='app/src/main/java/com/example/tapreplay/TapAccessibilityService.java'
-          LOG='app/src/main/java/com/example/tapreplay/TraceLogger.java'
+          CAP='app/src/main/java/com/example/tapreplay/ScreenCaptureService.java'
+          DIAG='app/src/main/java/com/example/tapreplay/StabilityDiagnostics.java'
+          FLOW7='app/src/main/java/com/example/tapreplay/ShareFlowV7.java'
+          FLOW8='app/src/main/java/com/example/tapreplay/ShareFlowV8.java'
 
-          # Frozen sampling/model quality rules.
+          # Recognition/sampling baseline stays frozen.
           grep -q 'TARGET_FRAMES = 18' "$CTRL"
           grep -q 'MAX_FRAMES = 20' "$CTRL"
           grep -q 'SAMPLE_INTERVAL_MS = 300' "$CTRL"
           grep -q 'MAX_CAPTURE_MS = 8000' "$CTRL"
           grep -q 'AFTER_SWIPE_MS = 950' "$CTRL"
+          grep -q 'SIGLIP_PIPELINE_BATCH = 9' "$CTRL"
           grep -q 'FEMALE_MIN_PROB = 0.40f' "$MODEL"
+          grep -q 'FEMALE_MIN_MARGIN = 0.04f' "$MODEL"
+          grep -q 'FEMALE_RATIO_PERSON = 0.60f' "$MODEL"
+          grep -q 'FEMALE_RATIO_ALL = 0.50f' "$MODEL"
           grep -q 'POS_A_TOPK = 0.68f' "$MODEL"
           grep -q 'POS_A_MAX = 0.75f' "$MODEL"
           grep -q 'POS_B_TOPK = 0.60f' "$MODEL"
@@ -49,67 +51,30 @@ jobs:
           grep -q 'BORDER_TOPK = 0.46f' "$MODEL"
           grep -q 'SENSUAL_INDEX = 4' "$MODEL"
 
-          # Existing two-batch SigLIP pipeline remains unchanged.
-          grep -q 'SIGLIP_PIPELINE_BATCH = 9' "$CTRL"
-          grep -q 'engine.scoreSiglip(batch)' "$CTRL"
-          grep -q 'engine.analyzeWithSensual(frames, siglip.scores)' "$CTRL"
-          grep -q 'pipeline fallback to full analyze' "$CTRL"
-          grep -q 'siglipTailWaitMs=' "$CTRL"
-          grep -q 'public float\[\] scoreSiglip' "$MODEL"
-          grep -q 'public Decision analyzeWithSensual' "$MODEL"
-
-          # V8 is active and V7 still owns exact target + one-send safety.
+          # Share safety remains V8 wrapper + V7 one-send core.
           grep -q 'ShareFlowV8.shareToTarget' "$CTRL"
           grep -q 'ShareFlowV7.shareToTarget(service, target, running)' "$FLOW8"
           grep -q 'disableV7CoordinateCache' "$FLOW8"
-          grep -q 'cachedShareValid' "$FLOW8"
           ! grep -q 'swipeNextVideo' "$FLOW8"
-          grep -q 'SHARE_SKIP' "$CTRL"
-          grep -q '分享失败，已跳过' "$CTRL"
-
-          # Missed MainActivity event: success must be proven by current UI parameters, not windowId.
-          grep -q 'reconcilePostSendSuccess' "$FLOW8"
-          grep -q 'POST_SEND_RECONCILE' "$FLOW8"
-          grep -q 'lastShareDialogUptimeMs' "$FLOW8"
-          grep -q 'VIEW_CLICK_SEQ' "$FLOW8"
-          grep -q 'lastViewClickWindowId' "$FLOW8"
-          grep -q 'lastViewClickClass' "$FLOW8"
-          grep -q 'isVideoPageReady' "$FLOW8"
-          grep -q 'waitForStableVideoPage' "$FLOW8"
-          grep -q 'VIDEO_READY_STABLE_COUNT = 2' "$FLOW8"
-          grep -q 'isSharePanelVisibleAnyWindow' "$FLOW8"
-          grep -q 'hasRightRailShareParameterInRoot' "$FLOW8"
-          grep -q '主界面已恢复（状态补偿）' "$FLOW8"
-
-          # Recovery: passive wait first; Back/outside tap only while share UI remains; never swipe.
-          grep -q 'PASSIVE_RECOVER_WAIT_MS = 450L' "$FLOW8"
-          grep -q 'video page restored passively' "$FLOW8"
-          grep -q 'share panel visible -> BACK' "$FLOW8"
-          grep -q 'recover-outside' "$FLOW8"
-          grep -q 'panel remains -> final BACK' "$FLOW8"
-          ! grep -q 'swipeNextVideo' "$FLOW8"
-
-          # Proven V7 safety gates remain intact.
-          ! grep -q 'swipeContactRow' "$FLOW7"
-          ! grep -q 'FORWARD_PAGES' "$FLOW7"
-          ! grep -q 'RESET_SWIPES' "$FLOW7"
-          grep -q 'findAccessibilityNodeInfosByText("分享")' "$FLOW7"
-          grep -q 'PANEL_MIN_SETTLE_MS = 250L' "$FLOW7"
-          grep -q 'TARGET_ACK_TIMEOUT_MS = 500L' "$FLOW7"
-          grep -q 'TYPE_VIEW_CLICKED' "$FLOW7"
           grep -q 'waitForTargetAccepted' "$FLOW7"
           grep -q 'detectActiveSendButtonByPixels' "$FLOW7"
-          grep -q 'main.MainActivity' "$FLOW7"
-          grep -q 'ShareFlowV7.onAccessibilityEvent' "$UI"
-          grep -q 'TYPE_WINDOW_CONTENT_CHANGED) return' "$UI"
-          grep -q 'status.setMaxLines(2)' "$UI"
 
-          # Log/storage limits and version.
-          grep -q 'MAX_FILE_BYTES = 1024L \* 1024L' "$LOG"
-          grep -q 'MAX_BACKUPS = 4' "$LOG"
-          grep -q "versionName '0.7.5'" app/build.gradle
-          grep -q 'versionCode 12' app/build.gradle
-          echo 'v0.7.5 robust share/recovery/quality checks passed.'
+          # Internal stability changes.
+          grep -q 'CLIP_INFER_BATCH = 12' "$MODEL"
+          grep -q 'ORT_INTRA_OP_THREADS_MAX = 4' "$MODEL"
+          grep -q 'ensureSiglipInputBuffer' "$MODEL"
+          grep -q 'ensureClipInputBuffer' "$MODEL"
+          grep -q 'MEMBUF' "$MODEL"
+          grep -q 'CAPTURE_RECOVER_AFTER_MISSES = 3' "$CTRL"
+          grep -q 'recoverCapturePipeline' "$CTRL"
+          grep -q 'recoverCapturePipeline' "$CAP"
+          grep -q 'getHistoricalProcessExitReasons' "$DIAG"
+          grep -q 'getNativeHeapAllocatedSize' "$DIAG"
+          grep -q 'getCurrentThermalStatus' "$DIAG"
+
+          grep -q "versionName '0.7.6-internal.1'" app/build.gradle
+          grep -q 'versionCode 13' app/build.gradle
+          echo 'Internal stability invariants passed.'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -128,7 +93,7 @@ jobs:
           pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
           pip install pillow transformers==4.50.0 huggingface_hub onnx==1.17.0 onnxruntime==1.29.0
 
-      - name: Export corrected FP16 ONNX models
+      - name: Export FP16 ONNX models
         run: |
           mkdir -p app/src/main/assets/models
           python tools/export_models.py app/src/main/assets/models
@@ -146,29 +111,16 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon
 
-      - name: Prepare named APK
+      - name: Prepare internal APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.5.apk
-          ls -lh DouyinFilter-v0.7.5.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.6-internal1.apk
+          sha256sum DouyinFilter-v0.7.6-internal1.apk
+          ls -lh DouyinFilter-v0.7.6-internal1.apk
 
-      - name: Upload APK artifact
+      - name: Upload internal APK artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.5-debug-apk
-          path: DouyinFilter-v0.7.5.apk
+          name: DouyinFilter-v0.7.6-internal1-debug-apk
+          path: DouyinFilter-v0.7.6-internal1.apk
           compression-level: 0
-          retention-days: 30
-
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.7.5
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.7.5.apk --clobber
-          else
-            gh release create "$TAG" DouyinFilter-v0.7.5.apk \
-              --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.7.5" \
-              --notes "V0.7.5 完整收口分享稳定性，不改识别质量参数。每条视频分享前继续强制清除旧坐标缓存，重新按当前视频右侧栏Accessibility参数定位分享，降低误点收藏。发送后正常收到MainActivity事件仍立即成功；若事件偶发丢失，不再依赖分享前windowId，而是在确认本轮确实打开过分享面板且联系人点击被抖音接收的前提下，以当前UI状态补偿确认：所有Douyin窗口均无可见“分享给”面板、当前活动窗口仍为抖音、右侧真实分享参数重新出现，并连续两次稳定后直接判成功。真正失败不会重复点好友或重复发送，先被动等待抖音自行收尾，再仅在分享框仍存在时有限Back、必要时点视频上方安全空白区、最后再有限Back；恢复逻辑绝不滑动，下一视频仍由主循环唯一上滑。单次分享失败不再停止自动化。18帧、300ms采样、两批9帧SigLIP流水线、CLIP女性Gate、A/B/C/D、全部阈值和约5MiB滚动日志均保持不变。"
-          fi
+          retention-days: 14
