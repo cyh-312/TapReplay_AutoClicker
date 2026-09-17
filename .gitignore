@@ -1,0 +1,23 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+
+# 本地模型与构建产物
+app/src/main/assets/models/*.onnx
+app/src/main/assets/models/*.bin
+app/src/main/assets/models/*.safetensors
+*.apk
+*.aab
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统文件
+.DS_Store
+Thumbs.db
