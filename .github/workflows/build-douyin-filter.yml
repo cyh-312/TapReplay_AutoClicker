@@ -23,6 +23,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify v0.7 share safety invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV5.java'
+          CTRL='app/src/main/java/com/example/tapreplay/AutomationController.java'
+          UI='app/src/main/java/com/example/tapreplay/TapAccessibilityService.java'
+
+          grep -q 'ShareFlowV5.shareToTarget' "$CTRL"
+          ! grep -q 'ShareFlowV4.shareToTarget' "$CTRL"
+          ! grep -q 'swipeContactRow' "$FLOW"
+          ! grep -q 'FORWARD_PAGES' "$FLOW"
+          ! grep -q 'RESET_SWIPES' "$FLOW"
+          grep -q '只扫描当前可见联系人' "$FLOW"
+          grep -q 'detectActiveSendButtonByPixels' "$FLOW"
+          grep -q 'status.setMaxLines(2)' "$UI"
+          grep -q "versionName '0.7.0'" app/build.gradle
+          echo 'v0.7 static safety checks passed.'
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -60,27 +79,27 @@ jobs:
 
       - name: Prepare named APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.6.apk
-          ls -lh DouyinFilter-v0.6.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.apk
+          ls -lh DouyinFilter-v0.7.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.6-debug-apk
-          path: DouyinFilter-v0.6.apk
+          name: DouyinFilter-v0.7-debug-apk
+          path: DouyinFilter-v0.7.apk
           compression-level: 0
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.6.0
+          TAG: douyin-filter-v0.7.0
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.6.apk --clobber
+            gh release upload "$TAG" DouyinFilter-v0.7.apk --clobber
           else
-            gh release create "$TAG" DouyinFilter-v0.6.apk \
+            gh release create "$TAG" DouyinFilter-v0.7.apk \
               --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.6" \
-              --notes "V0.6：重点修复分享慢、日志无法定位、联系人被自动横滑后消失的问题。分享日志拆成①找分享、②认分享栏、③找联系人、④点联系人、⑤找发送、⑥发送，并显示当前次数/候选数/耗时；联系人会先原地连续扫描并尝试复位到常用联系人起点，确认没有目标后才有限翻页；昵称匹配区域扩大到整个分享联系人安全区域；发送按钮已亮时不再重复点联系人；失败时保留最后阶段日志。SigLIP2 + CLIP 模型、阈值和视频判断规则不变。"
+              --title "DouyinFilter Android V0.7" \
+              --notes "V0.7 稳定优先版：分享前清理上一次残留面板；只认右侧高可信分享按钮；必须精确确认“分享给”；联系人只扫描当前可见区域，彻底取消自动横滑；目标只允许精确匹配且最多点击一次；发送只认内存截图中已经亮起的大面积抖音红色按钮，不用灰色发送节点推断选中状态；发送只点一次，失败保留现场；悬浮日志固定两行显示①~⑥阶段和耗时。SigLIP2 + CLIP 模型、采样、女性门控、A/B/C/D 和阈值全部不变。"
           fi
