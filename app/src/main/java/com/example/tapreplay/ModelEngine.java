@@ -206,14 +206,43 @@ public class ModelEngine {
         return out;
     }
 
+    /**
+     * Full legacy-quality analysis. Kept as a safe fallback and as a reference path.
+     */
     public Decision analyze(List<FrameData> frames) throws Exception {
         ensureLoaded();
         if (frames.size() < 2) {
             return new Decision("insufficient", "INSUFFICIENT",
                     "有效采样帧不足", 0, 0, 0, 0);
         }
+        float[] sensual = scoreSiglip(frames);
+        return analyzeWithSensual(frames, sensual);
+    }
 
-        float[] sensual = runSiglip(frames);
+    /**
+     * Run only the unchanged SigLIP2 sensual branch. This makes it possible to overlap
+     * SigLIP inference with frame capture without changing the model, preprocessing or scores.
+     */
+    public float[] scoreSiglip(List<FrameData> frames) throws Exception {
+        ensureLoaded();
+        if (frames == null || frames.isEmpty()) return new float[0];
+        return runSiglip(frames);
+    }
+
+    /**
+     * Finish the exact same CLIP female gate and A/B/C/D decision rules using already-computed
+     * SigLIP scores. The score array must correspond one-to-one with frames in capture order.
+     */
+    public Decision analyzeWithSensual(List<FrameData> frames, float[] sensual) throws Exception {
+        ensureLoaded();
+        if (frames.size() < 2) {
+            return new Decision("insufficient", "INSUFFICIENT",
+                    "有效采样帧不足", 0, 0, 0, 0);
+        }
+        if (sensual == null || sensual.length != frames.size()) {
+            throw new IllegalArgumentException("SigLIP分数数量与采样帧不一致");
+        }
+
         List<Integer> checkIndices = selectFemaleCheckIndices(sensual);
 
         List<Bitmap> flatViews = new ArrayList<>();
