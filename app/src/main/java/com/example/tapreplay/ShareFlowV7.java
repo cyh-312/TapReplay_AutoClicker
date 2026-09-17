@@ -24,13 +24,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * V0.7.2 parameter-driven fast share flow.
+ * V0.7.3 parameter-driven fast share flow with a small state-synchronization gate.
  *
- * The expensive full-video-tree confirmation loops from V0.7.1 are deliberately removed.
  * Normal path:
  *   strong right-rail share parameter -> tap once
  *   -> SharePanelDialog WINDOW_STATE_CHANGED
+ *   -> wait only until the panel reaches a minimum stable age
  *   -> exact visible target -> tap once
+ *   -> require real Douyin VIEW_CLICKED or selected-state window transition
  *   -> active red Send button -> tap once
  *   -> MainActivity WINDOW_STATE_CHANGED
  *   -> short animation settle -> success.
@@ -50,32 +51,60 @@ public final class ShareFlowV7 {
     private static final String SHARE_DIALOG_MARK = "sharepanel";
     private static final String MAIN_ACTIVITY_MARK = "main.MainActivity";
     private static final int TARGET_SCANS = 2;
+    private static final long PANEL_MIN_SETTLE_MS = 250L;
+    private static final long TARGET_ACK_TIMEOUT_MS = 500L;
 
-    // Window-state events are cheap, precise signals. They are copied immediately from
-    // AccessibilityEvent because the framework recycles the event after callback return.
     private static final AtomicLong WINDOW_STATE_SEQ = new AtomicLong(0L);
     private static volatile long lastWindowStateUptimeMs = 0L;
     private static volatile int lastWindowId = -1;
     private static volatile String lastWindowPackage = "";
     private static volatile String lastWindowClass = "";
+    private static volatile long lastShareDialogUptimeMs = 0L;
+    private static volatile int lastShareDialogWindowId = -1;
 
-    // Once one real SharePanelDialog opening confirms a coordinate, reuse that coordinate.
-    // If it ever fails to open the dialog, the cache is discarded and parameters are queried again.
+    private static final AtomicLong VIEW_CLICK_SEQ = new AtomicLong(0L);
+    private static volatile long lastViewClickUptimeMs = 0L;
+    private static volatile int lastViewClickWindowId = -1;
+    private static volatile String lastViewClickPackage = "";
+    private static volatile String lastViewClickClass = "";
+
     private static volatile boolean cachedShareValid = false;
     private static volatile float cachedShareX = 0f;
     private static volatile float cachedShareY = 0f;
 
     public static void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
-        long seq = WINDOW_STATE_SEQ.incrementAndGet();
-        lastWindowStateUptimeMs = SystemClock.uptimeMillis();
-        lastWindowId = event.getWindowId();
-        lastWindowPackage = text(event.getPackageName());
-        lastWindowClass = text(event.getClassName());
-        if (TraceLogger.isShareTracing()) {
-            TraceLogger.log("STATE",
-                    "seq=" + seq + " windowId=" + lastWindowId +
-                    " pkg=" + lastWindowPackage + " class=" + lastWindowClass);
+        if (event == null) return;
+        int type = event.getEventType();
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            long seq = WINDOW_STATE_SEQ.incrementAndGet();
+            lastWindowStateUptimeMs = SystemClock.uptimeMillis();
+            lastWindowId = event.getWindowId();
+            lastWindowPackage = text(event.getPackageName());
+            lastWindowClass = text(event.getClassName());
+            if (DOUYIN_PACKAGE.equals(lastWindowPackage) &&
+                    normalize(lastWindowClass).contains(SHARE_DIALOG_MARK)) {
+                lastShareDialogUptimeMs = lastWindowStateUptimeMs;
+                lastShareDialogWindowId = lastWindowId;
+            }
+            if (TraceLogger.isShareTracing()) {
+                TraceLogger.log("STATE",
+                        "seq=" + seq + " windowId=" + lastWindowId +
+                        " pkg=" + lastWindowPackage + " class=" + lastWindowClass);
+            }
+            return;
+        }
+
+        if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            long seq = VIEW_CLICK_SEQ.incrementAndGet();
+            lastViewClickUptimeMs = SystemClock.uptimeMillis();
+            lastViewClickWindowId = event.getWindowId();
+            lastViewClickPackage = text(event.getPackageName());
+            lastViewClickClass = text(event.getClassName());
+            if (TraceLogger.isShareTracing()) {
+                TraceLogger.log("CLICK_STATE",
+                        "seq=" + seq + " windowId=" + lastViewClickWindowId +
+                        " pkg=" + lastViewClickPackage + " class=" + lastViewClickClass);
+            }
         }
     }
 
@@ -91,7 +120,7 @@ public final class ShareFlowV7 {
         TraceLogger.init(service);
         TraceLogger.setShareTracing(true);
         final long started = SystemClock.uptimeMillis();
-        TraceLogger.critical("SHARE", "BEGIN v0.7.2 target=" + compactName(target));
+        TraceLogger.critical("SHARE", "BEGIN v0.7.3 target=" + compactName(target));
 
         try {
             return shareInternal(service, target, running, started);
@@ -128,6 +157,8 @@ public final class ShareFlowV7 {
         log(started, "②分享栏｜弹层已就绪", "SharePanelDialog 已确认");
         panel.recycle();
 
+        if (!waitForPanelSettle(running, PANEL_MIN_SETTLE_MS)) return false;
+
         ContactHit hit = null;
         for (int i = 1; i <= TARGET_SCANS && running.get(); i++) {
             long t0 = SystemClock.uptimeMillis();
@@ -161,11 +192,21 @@ public final class ShareFlowV7 {
             log(started, "④点好友｜已经选中", "直接找发送按钮");
         } else {
             log(started, "④点好友｜只点一次", "精确目标坐标");
+            long clickBefore = VIEW_CLICK_SEQ.get();
+            long stateBefore = WINDOW_STATE_SEQ.get();
             if (!tap(service, hit.tapX, hit.tapY, 60, "target")) {
                 fail(started, "失败④｜好友没点上", "点击手势没有完成");
                 return false;
             }
-            SystemClock.sleep(90);
+            if (!waitForTargetAccepted(running, clickBefore, stateBefore, TARGET_ACK_TIMEOUT_MS)) {
+                if (isKeyboardVisible(service)) {
+                    dismissKeyboardIfVisible(service, running);
+                    fail(started, "失败④｜点后弹出键盘", "已收起键盘，不再继续");
+                } else {
+                    fail(started, "失败④｜抖音没接住好友点击", "未收到点击/选中状态，不重复点好友");
+                }
+                return false;
+            }
             if (isKeyboardVisible(service)) {
                 dismissKeyboardIfVisible(service, running);
                 fail(started, "失败④｜点后弹出键盘", "已收起键盘，不再继续");
@@ -196,7 +237,6 @@ public final class ShareFlowV7 {
             TraceLogger.critical("POST_SEND", "MainActivity returned elapsedMs=" + returnMs +
                     " windowId=" + lastWindowId);
             log(started, "分享完成✓", "主界面已返回｜" + returnMs + "ms");
-            // Only let the closing animation finish. AutomationController will then continue.
             SystemClock.sleep(300);
             return true;
         }
@@ -210,8 +250,6 @@ public final class ShareFlowV7 {
             AtomicBoolean running,
             long started) {
 
-        // Fast path after the first confirmed share: right-rail share coordinates are stable
-        // across ordinary feed videos. The dialog event is the validation; no dialog means cache drop.
         if (cachedShareValid && running.get()) {
             long before = WINDOW_STATE_SEQ.get();
             TraceLogger.log("SHARE_FIND", "cached x=" + Math.round(cachedShareX) +
@@ -267,10 +305,6 @@ public final class ShareFlowV7 {
         return true;
     }
 
-    /**
-     * Ask Accessibility for nodes containing "分享" directly instead of manually walking
-     * ~900 video-page nodes across process boundaries. Geometry and descriptions still gate clicks.
-     */
     private static ShareCandidate findShareCandidateByQuery(
             TapAccessibilityService service,
             AccessibilityNodeInfo root) {
@@ -366,6 +400,55 @@ public final class ShareFlowV7 {
                 return true;
             }
             SystemClock.sleep(25);
+        }
+        return false;
+    }
+
+    private static boolean waitForPanelSettle(AtomicBoolean running, long minAgeMs) {
+        long opened = lastShareDialogUptimeMs;
+        if (opened <= 0L) return running.get();
+        long age = SystemClock.uptimeMillis() - opened;
+        long remain = minAgeMs - age;
+        if (remain <= 0L) return running.get();
+        TraceLogger.log("PANEL", "settle waitMs=" + remain + " currentAgeMs=" + age);
+        long end = SystemClock.uptimeMillis() + remain;
+        while (running.get() && SystemClock.uptimeMillis() < end) {
+            SystemClock.sleep(Math.min(20L, Math.max(1L, end - SystemClock.uptimeMillis())));
+        }
+        return running.get();
+    }
+
+    private static boolean waitForTargetAccepted(
+            AtomicBoolean running,
+            long afterClickSeq,
+            long afterStateSeq,
+            long timeoutMs) {
+        long end = SystemClock.uptimeMillis() + timeoutMs;
+        while (running.get() && SystemClock.uptimeMillis() < end) {
+            long clickSeq = VIEW_CLICK_SEQ.get();
+            if (clickSeq > afterClickSeq && DOUYIN_PACKAGE.equals(lastViewClickPackage)) {
+                boolean samePanel = lastShareDialogWindowId < 0 || lastViewClickWindowId == lastShareDialogWindowId;
+                boolean imageClick = normalize(lastViewClickClass).contains("imageview");
+                if (samePanel || imageClick) {
+                    TraceLogger.critical("TARGET_ACK",
+                            "VIEW_CLICKED seq=" + clickSeq +
+                            " windowId=" + lastViewClickWindowId +
+                            " class=" + lastViewClickClass +
+                            " delayMs=" + Math.max(0L, SystemClock.uptimeMillis() - lastViewClickUptimeMs));
+                    return true;
+                }
+            }
+
+            long stateSeq = WINDOW_STATE_SEQ.get();
+            String cls = normalize(lastWindowClass);
+            if (stateSeq > afterStateSeq && DOUYIN_PACKAGE.equals(lastWindowPackage) &&
+                    lastWindowId != lastShareDialogWindowId && cls.contains("android.widget.framelayout")) {
+                TraceLogger.critical("TARGET_ACK",
+                        "WINDOW_STATE_CHANGED seq=" + stateSeq +
+                        " windowId=" + lastWindowId + " class=" + lastWindowClass);
+                return true;
+            }
+            SystemClock.sleep(20);
         }
         return false;
     }
@@ -508,7 +591,6 @@ public final class ShareFlowV7 {
         return null;
     }
 
-    /** Share dialog is tiny (~67 nodes in the captured run), so scanning it is cheap. */
     private static PanelRead readPanelSmall(TapAccessibilityService service) {
         AccessibilityNodeInfo root = getActiveDouyinRoot(service);
         if (root == null) return null;
@@ -595,7 +677,6 @@ public final class ShareFlowV7 {
                         }
                     } catch (Throwable ignored) {
                     } finally {
-                        // root ownership transfers on return; otherwise recycle here.
                         if (root != null && !DOUYIN_PACKAGE.equals(text(root.getPackageName()))) safeRecycle(root);
                     }
                 }
