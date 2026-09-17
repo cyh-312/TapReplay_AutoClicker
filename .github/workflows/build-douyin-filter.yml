@@ -23,30 +23,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify v0.7.1 share safety invariants
+      - name: Verify v0.7.2 fast share invariants
         shell: bash
         run: |
           set -euo pipefail
-          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV6.java'
+          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV7.java'
           CTRL='app/src/main/java/com/example/tapreplay/AutomationController.java'
           UI='app/src/main/java/com/example/tapreplay/TapAccessibilityService.java'
           LOG='app/src/main/java/com/example/tapreplay/TraceLogger.java'
 
-          grep -q 'ShareFlowV6.shareToTarget' "$CTRL"
-          ! grep -q 'ShareFlowV5.shareToTarget' "$CTRL"
+          grep -q 'ShareFlowV7.shareToTarget' "$CTRL"
+          ! grep -q 'ShareFlowV6.shareToTarget' "$CTRL"
           ! grep -q 'swipeContactRow' "$FLOW"
           ! grep -q 'FORWARD_PAGES' "$FLOW"
           ! grep -q 'RESET_SWIPES' "$FLOW"
-          grep -q 'Current visible contacts only' "$FLOW"
+          grep -q 'findAccessibilityNodeInfosByText("分享")' "$FLOW"
+          grep -q 'SharePanelDialog' "$FLOW"
+          grep -q 'main.MainActivity' "$FLOW"
           grep -q 'detectActiveSendButtonByPixels' "$FLOW"
-          grep -q 'getRootInActiveWindow' "$FLOW"
-          grep -q 'n.isVisibleToUser()' "$FLOW"
-          grep -q 'waitReturnToVideo' "$FLOW"
+          grep -q 'ShareFlowV7.onAccessibilityEvent' "$UI"
+          grep -q 'TYPE_WINDOW_CONTENT_CHANGED) return' "$UI"
           grep -q 'status.setMaxLines(2)' "$UI"
           grep -q 'MAX_FILE_BYTES = 1024L \* 1024L' "$LOG"
           grep -q 'MAX_BACKUPS = 4' "$LOG"
-          grep -q "versionName '0.7.1'" app/build.gradle
-          echo 'v0.7.1 static safety checks passed.'
+          grep -q "versionName '0.7.2'" app/build.gradle
+          echo 'v0.7.2 static fast-share checks passed.'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -85,27 +86,27 @@ jobs:
 
       - name: Prepare named APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.1.apk
-          ls -lh DouyinFilter-v0.7.1.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.2.apk
+          ls -lh DouyinFilter-v0.7.2.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.1-debug-apk
-          path: DouyinFilter-v0.7.1.apk
+          name: DouyinFilter-v0.7.2-debug-apk
+          path: DouyinFilter-v0.7.2.apk
           compression-level: 0
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.7.1
+          TAG: douyin-filter-v0.7.2
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.7.1.apk --clobber
+            gh release upload "$TAG" DouyinFilter-v0.7.2.apk --clobber
           else
-            gh release create "$TAG" DouyinFilter-v0.7.1.apk \
+            gh release create "$TAG" DouyinFilter-v0.7.2.apk \
               --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.7.1" \
-              --notes "V0.7.1 分享流程修复与诊断版：分享按钮优先从当前活动抖音窗口查找并在命中右侧高可信节点后尽快结束扫描；分享面板只认当前活动窗口中可见的“分享给”，避免旧窗口/旧节点残留导致发送后假失败；发送后必须确认当前活动窗口回到带右侧高可信分享按钮的视频页才算完成，仍然绝不重复发送。新增固定应用目录滚动诊断日志，douyin.log + 4 个备份，每个约 1MiB，总量约 5MiB；记录①~⑥阶段、手势回调、Accessibility 窗口事件、扫描耗时和发送后确认过程。SigLIP2 + CLIP 模型、采样、女性门控、A/B/C/D 和阈值全部不变。"
+              --title "DouyinFilter Android V0.7.2" \
+              --notes "V0.7.2 参数驱动快速分享版：发送后不再遍历视频页确认右侧分享按钮，而是收到抖音 MainActivity 的 WINDOW_STATE_CHANGED 后直接判定已回主界面，短暂等待动画结束后继续下一条；打开分享栏同样优先使用 SharePanelDialog 窗口状态事件。首次分享按钮通过 Accessibility 参数查询直接定位，不再手工遍历约 900 个视频页节点；首次成功后缓存已验证分享坐标，后续优先直接点击并用 SharePanelDialog 事件校验。联系人仍精确匹配且最多点击一次，发送仍只认激活红色按钮且只发送一次。详细日志继续固定约 5MiB，并停止写入高频 WINDOW_CONTENT_CHANGED。SigLIP2 + CLIP、采样、女性门控、A/B/C/D 和全部阈值不变。"
           fi
