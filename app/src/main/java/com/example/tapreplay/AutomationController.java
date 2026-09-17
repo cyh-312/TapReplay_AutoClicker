@@ -143,10 +143,10 @@ public class AutomationController {
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜符合，准备打开分享…");
                     long shareStart = System.currentTimeMillis();
-                    boolean ok = ShareFlowV6.shareToTarget(service, target, running);
+                    boolean ok = ShareFlowV7.shareToTarget(service, target, running);
                     long shareMs = System.currentTimeMillis() - shareStart;
                     if (!ok && running.get()) {
-                        // ShareFlowV6 会保留明确的两行失败阶段日志；这里不能覆盖。
+                        // ShareFlowV7 会保留明确的两行失败阶段日志；这里不能覆盖。
                         running.set(false);
                         break;
                     }
