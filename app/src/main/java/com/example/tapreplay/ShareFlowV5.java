@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 1. 只点右侧操作栏高可信“分享”按钮；
  * 2. 点击后必须精确看到“分享给”才继续；
  * 3. 只扫描当前可见联系人，绝不自动横滑联系人栏；
- * 4. 目标昵称必须精确匹配；目标是否已选只看目标自身状态，不拿“发送”节点代替；
+ * 4. 目标昵称必须精确匹配；目标是否已选只看目标自身状态；
  * 5. 未选中时目标最多点击一次，绝不补点，避免把选中状态再次取消；
  * 6. 发送按钮只用内存截图识别已经亮起的大面积抖音红色按钮；
  * 7. 发送只点一次；失败后保留分享面板，便于直接看现场和日志；
@@ -59,6 +59,18 @@ public final class ShareFlowV5 {
             return false;
         }
 
+        // 如果上一次失败后分享栏还留着，先关掉再重新打开。
+        // 这样每次都从干净状态开始，避免沿用上一次的选中联系人或旧面板状态。
+        if (isSharePanelOpenNow(service)) {
+            log(started, "准备分享｜清理旧面板", "先关闭上一次残留的分享栏");
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+            SystemClock.sleep(220);
+            if (isSharePanelOpenNow(service)) {
+                fail(started, "失败0｜旧分享栏关不掉", "没有继续操作");
+                return false;
+            }
+        }
+
         log(started, "①找分享｜看右侧按钮", "只认高可信分享按钮");
         if (!openSharePanel(service, running, started)) {
             fail(started, "失败①｜分享栏没打开", "没继续乱点");
@@ -84,13 +96,13 @@ public final class ShareFlowV5 {
         }
 
         if (!running.get()) return false;
+        if (hit != null && hit.ambiguous) {
+            fail(started, "失败③｜有同名对象", "为避免误发，没有继续点");
+            return false;
+        }
         if (hit == null || !hit.found) {
             int count = hit == null ? 0 : hit.visibleCount;
             fail(started, "失败③｜当前页没目标", "看到" + count + "个名字｜联系人栏未移动");
-            return false;
-        }
-        if (hit.ambiguous) {
-            fail(started, "失败③｜有同名对象", "为避免误发，没有继续点");
             return false;
         }
 
@@ -119,7 +131,7 @@ public final class ShareFlowV5 {
         }
 
         log(started, "⑤找发送｜等红色按钮亮", "只认底部大面积红色按钮");
-        PointHit send = waitActiveSendButton(service, running, started, 1350);
+        PointHit send = waitActiveSendButton(running, started, 1350);
         if (send == null) {
             fail(started, "失败⑤｜发送没亮", "不会再点好友，现场已保留");
             return false;
@@ -219,10 +231,10 @@ public final class ShareFlowV5 {
 
             boolean forbidden = isForbiddenShareText(tx) || isForbiddenShareText(ds) ||
                     cls.contains("edittext") || cls.contains("textfield");
-            boolean rightRail = b.centerX() >= w * 0.80f &&
-                    b.centerY() >= h * 0.18f && b.centerY() <= h * 0.90f;
+            boolean rightRail = b.centerX() >= w * 0.82f &&
+                    b.centerY() >= h * 0.20f && b.centerY() <= h * 0.90f;
             boolean compact = b.width() > 0 && b.height() > 0 &&
-                    b.width() <= w * 0.24f && b.height() <= h * 0.16f;
+                    b.width() <= w * 0.20f && b.height() <= h * 0.11f;
             boolean strongDesc = ds.startsWith("分享") && ds.contains("按钮") && !isForbiddenShareText(ds);
             boolean exact = "分享".equals(tx) || "分享".equals(ds);
 
@@ -232,19 +244,19 @@ public final class ShareFlowV5 {
                 if (strongDesc) score += 700;
                 if (exact) score += 220;
                 if (n.isClickable()) score += 90;
-                if (b.centerX() >= w * 0.86f) score += 90;
+                if (b.centerX() >= w * 0.88f) score += 90;
                 addShareCandidate(out, n, b, score);
 
-                // 真正可点击区域可能是文字节点的父容器，只向上看两层。
+                // 真正可点击区域可能是文字节点的父容器，只向上看两层，而且必须仍是右侧小块。
                 AccessibilityNodeInfo p = n.getParent();
                 for (int depth = 0; p != null && depth < 2; depth++) {
                     Rect pb = new Rect();
                     p.getBoundsInScreen(pb);
                     boolean parentOk = p.isVisibleToUser() && p.isEnabled() &&
-                            pb.centerX() >= w * 0.80f &&
-                            pb.centerY() >= h * 0.18f && pb.centerY() <= h * 0.90f &&
+                            pb.centerX() >= w * 0.82f &&
+                            pb.centerY() >= h * 0.20f && pb.centerY() <= h * 0.90f &&
                             pb.width() > 0 && pb.height() > 0 &&
-                            pb.width() <= w * 0.27f && pb.height() <= h * 0.17f;
+                            pb.width() <= w * 0.22f && pb.height() <= h * 0.12f;
                     if (parentOk) {
                         addShareCandidate(out, p, pb,
                                 score + (p.isClickable() ? 140 : 15) - depth * 10);
@@ -556,7 +568,6 @@ public final class ShareFlowV5 {
     }
 
     private static PointHit waitActiveSendButton(
-            TapAccessibilityService service,
             AtomicBoolean running,
             long started,
             long timeoutMs) {
@@ -564,7 +575,6 @@ public final class ShareFlowV5 {
         long end = SystemClock.uptimeMillis() + timeoutMs;
         int poll = 0;
         while (SystemClock.uptimeMillis() < end && running.get()) {
-            if (!isSharePanelOpenNow(service)) return null;
             poll++;
             PointHit hit = detectActiveSendButtonByPixels();
             if (hit != null) return hit;
@@ -634,39 +644,20 @@ public final class ShareFlowV5 {
             int midY = (bestStart + bestEnd) / 2;
             int minX = w;
             int maxX = -1;
-            int currentStart = -1;
-            int bestSegStart = -1;
-            int bestSegEnd = -1;
-            int bestSegLen = 0;
-
-            // 取“连续”的最长粉红横段，防止头像红勾等零散红色干扰。
+            int midHits = 0;
             for (int x = x0; x < x1; x += 2) {
                 if (isDouyinPink(img.getPixel(x, midY))) {
-                    if (currentStart < 0) currentStart = x;
-                } else if (currentStart >= 0) {
-                    int len = x - currentStart;
-                    if (len > bestSegLen) {
-                        bestSegLen = len;
-                        bestSegStart = currentStart;
-                        bestSegEnd = x - 2;
-                    }
-                    currentStart = -1;
-                }
-            }
-            if (currentStart >= 0) {
-                int len = x1 - currentStart;
-                if (len > bestSegLen) {
-                    bestSegLen = len;
-                    bestSegStart = currentStart;
-                    bestSegEnd = x1 - 2;
+                    midHits++;
+                    minX = Math.min(minX, x);
+                    maxX = Math.max(maxX, x);
                 }
             }
 
-            if (bestSegStart >= 0) {
-                minX = bestSegStart;
-                maxX = bestSegEnd;
-            }
-            if (maxX <= minX || maxX - minX < w * 0.50f) return null;
+            // 该行本身也必须有足够多粉红色，并且左右跨度超过半屏。
+            // 允许中间“发送”白字把颜色分开，不要求粉红像素完全连续。
+            int midSamples = Math.max(1, (x1 - x0) / 2);
+            if (midHits < midSamples * 0.40f) return null;
+            if (maxX <= minX || maxX - minX < w * 0.52f) return null;
 
             return new PointHit((minX + maxX) / 2, midY);
         } catch (Throwable ignored) {
@@ -788,7 +779,7 @@ public final class ShareFlowV5 {
                 null);
         if (!accepted) return false;
         try {
-            latch.await(duration + 750, TimeUnit.MILLISECONDS);
+            latch.await(duration + 700, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
