@@ -20,10 +20,11 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 无障碍服务只负责：悬浮条、上滑、提供系统手势能力。
- * 分享流程全部交给 ShareFlowV5，避免旧分享逻辑和新状态机互相干扰。
+ * 分享流程全部交给 ShareFlowV6，避免旧分享逻辑和新状态机互相干扰。
  */
 public class TapAccessibilityService extends AccessibilityService {
     private static volatile TapAccessibilityService instance;
@@ -33,6 +34,10 @@ public class TapAccessibilityService extends AccessibilityService {
     private TextView button;
     private TextView status;
     private WindowManager.LayoutParams params;
+
+    private final AtomicLong uiEventSequence = new AtomicLong(0);
+    private volatile long lastUiEventUptimeMs = 0L;
+    private long lastContentEventLogMs = 0L;
 
     public static TapAccessibilityService getInstance() {
         return instance;
@@ -47,10 +52,19 @@ public class TapAccessibilityService extends AccessibilityService {
         }
     }
 
+    public long getUiEventSequence() {
+        return uiEventSequence.get();
+    }
+
+    public long getLastUiEventUptimeMs() {
+        return lastUiEventUptimeMs;
+    }
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        TraceLogger.init(this);
 
         // 再补一次关键 flags，确保能读取资源 ID、非重要节点和多窗口。
         try {
@@ -63,25 +77,52 @@ public class TapAccessibilityService extends AccessibilityService {
             }
         } catch (Throwable ignored) {}
 
+        TraceLogger.critical("SERVICE", "connected logDir=" + TraceLogger.getLogDirectory());
         showOverlay();
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // 分享状态机按需主动读取最新界面，不依赖事件缓存。
+        if (event == null) return;
+
+        long now = SystemClock.uptimeMillis();
+        long seq = uiEventSequence.incrementAndGet();
+        lastUiEventUptimeMs = now;
+
+        if (!TraceLogger.isShareTracing()) return;
+
+        int type = event.getEventType();
+        // Content-changed can fire extremely frequently; preserve the sequence counter but
+        // throttle only its disk/logcat representation so diagnostics stay lightweight.
+        if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            if (now - lastContentEventLogMs < 120L) return;
+            lastContentEventLogMs = now;
+        }
+
+        TraceLogger.log("A11Y",
+                "seq=" + seq +
+                " type=" + eventTypeName(type) +
+                " windowId=" + event.getWindowId() +
+                " pkg=" + safeText(event.getPackageName()) +
+                " class=" + safeText(event.getClassName()) +
+                " contentChanges=" + event.getContentChangeTypes());
     }
 
     @Override
-    public void onInterrupt() {}
+    public void onInterrupt() {
+        TraceLogger.critical("SERVICE", "onInterrupt");
+    }
 
     @Override
     public void onDestroy() {
         AutomationController.get(this).stop();
+        TraceLogger.critical("SERVICE", "destroy");
         if (wm != null && overlay != null) {
             try { wm.removeView(overlay); } catch (Throwable ignored) {}
         }
         overlay = null;
         instance = null;
+        TraceLogger.close();
         super.onDestroy();
     }
 
@@ -244,6 +285,20 @@ public class TapAccessibilityService extends AccessibilityService {
             return false;
         }
         return ok[0];
+    }
+
+    private static String eventTypeName(int type) {
+        switch (type) {
+            case AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED: return "WINDOW_STATE_CHANGED";
+            case AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED: return "WINDOW_CONTENT_CHANGED";
+            case AccessibilityEvent.TYPE_VIEW_CLICKED: return "VIEW_CLICKED";
+            case AccessibilityEvent.TYPE_WINDOWS_CHANGED: return "WINDOWS_CHANGED";
+            default: return "TYPE_" + type;
+        }
+    }
+
+    private static String safeText(CharSequence s) {
+        return s == null ? "" : s.toString();
     }
 
     private static float clamp(float v, float lo, float hi) {
