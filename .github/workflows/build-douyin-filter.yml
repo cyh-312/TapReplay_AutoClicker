@@ -23,7 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify v0.7.4 share recovery and quality invariants
+      - name: Verify v0.7.5 post-send reconciliation and recovery invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -49,7 +49,7 @@ jobs:
           grep -q 'BORDER_TOPK = 0.46f' "$MODEL"
           grep -q 'SENSUAL_INDEX = 4' "$MODEL"
 
-          # Pipeline remains two 9-frame SigLIP batches with identical final CLIP/rules.
+          # Existing two-batch SigLIP pipeline remains unchanged.
           grep -q 'SIGLIP_PIPELINE_BATCH = 9' "$CTRL"
           grep -q 'engine.scoreSiglip(batch)' "$CTRL"
           grep -q 'engine.analyzeWithSensual(frames, siglip.scores)' "$CTRL"
@@ -58,18 +58,33 @@ jobs:
           grep -q 'public float\[\] scoreSiglip' "$MODEL"
           grep -q 'public Decision analyzeWithSensual' "$MODEL"
 
-          # V8 is the active share entry point. V7 still owns the proven parameter/event flow.
+          # V8 remains the active share entry point and V7 owns the proven single-tap/send flow.
           grep -q 'ShareFlowV8.shareToTarget' "$CTRL"
-          ! grep -q 'ShareFlowV7.shareToTarget(service, target, running)' "$CTRL"
           grep -q 'ShareFlowV7.shareToTarget(service, target, running)' "$FLOW8"
           grep -q 'disableV7CoordinateCache' "$FLOW8"
           grep -q 'cachedShareValid' "$FLOW8"
-          grep -q 'share panel visible -> BACK' "$FLOW8"
-          grep -q 'recover-outside' "$FLOW8"
-          grep -q 'Do not swipe here' "$FLOW8"
           ! grep -q 'swipeNextVideo' "$FLOW8"
           grep -q 'SHARE_SKIP' "$CTRL"
           grep -q '分享失败，已跳过' "$CTRL"
+
+          # False-negative post-send reconciliation must require independent evidence.
+          grep -q 'reconcilePostSendSuccess' "$FLOW8"
+          grep -q 'POST_SEND_RECONCILE' "$FLOW8"
+          grep -q 'lastShareDialogUptimeMs' "$FLOW8"
+          grep -q 'VIEW_CLICK_SEQ' "$FLOW8"
+          grep -q 'lastViewClickWindowId' "$FLOW8"
+          grep -q 'lastViewClickClass' "$FLOW8"
+          grep -q 'sourceWindowId' "$FLOW8"
+          grep -q 'hasRightRailShareParameter' "$FLOW8"
+          grep -q 'isSharePanelVisibleAnyWindow' "$FLOW8"
+          grep -q 'stable >= 2' "$FLOW8"
+
+          # Recovery must never Back from the already-restored source video and never swipe.
+          grep -q 'source video already active' "$FLOW8"
+          grep -q 'modal/share layer -> BACK' "$FLOW8"
+          grep -q 'recover-outside' "$FLOW8"
+          grep -q 'non-source window remains -> final BACK' "$FLOW8"
+          ! grep -q 'swipeNextVideo' "$FLOW8"
 
           # Proven V7 safety gates remain intact.
           ! grep -q 'swipeContactRow' "$FLOW7"
@@ -89,9 +104,9 @@ jobs:
           # Log/storage limits remain fixed.
           grep -q 'MAX_FILE_BYTES = 1024L \* 1024L' "$LOG"
           grep -q 'MAX_BACKUPS = 4' "$LOG"
-          grep -q "versionName '0.7.4'" app/build.gradle
-          grep -q 'versionCode 11' app/build.gradle
-          echo 'v0.7.4 static share-recovery/quality checks passed.'
+          grep -q "versionName '0.7.5'" app/build.gradle
+          grep -q 'versionCode 12' app/build.gradle
+          echo 'v0.7.5 static post-send/recovery/quality checks passed.'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -130,27 +145,27 @@ jobs:
 
       - name: Prepare named APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.4.apk
-          ls -lh DouyinFilter-v0.7.4.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.5.apk
+          ls -lh DouyinFilter-v0.7.5.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.4-debug-apk
-          path: DouyinFilter-v0.7.4.apk
+          name: DouyinFilter-v0.7.5-debug-apk
+          path: DouyinFilter-v0.7.5.apk
           compression-level: 0
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.7.4
+          TAG: douyin-filter-v0.7.5
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.7.4.apk --clobber
+            gh release upload "$TAG" DouyinFilter-v0.7.5.apk --clobber
           else
-            gh release create "$TAG" DouyinFilter-v0.7.4.apk \
+            gh release create "$TAG" DouyinFilter-v0.7.5.apk \
               --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.7.4" \
-              --notes "V0.7.4 聚焦分享稳定性，不改识别质量参数。每次分享前强制取消V0.7.3的跨视频分享坐标复用，重新通过当前视频右侧栏的Accessibility“分享”参数定位，避免不同视频工具栏布局变化时误点收藏。分享任一阶段失败不再终止自动化：不重复点好友、不重复发送，先在确认分享框仍可见时执行Back；若动画期间未关闭，再点视频上方安全空白区域；仍存在时最后再Back一次。恢复流程本身绝不滑动，下一条视频仍只由主循环执行一次正常上滑，避免双跳。分析侧继续保留18帧、300ms采样、两批9帧SigLIP流水线、原CLIP女性Gate、A/B/C/D及全部阈值，PERF日志和约5MiB滚动日志保持不变。"
+              --title "DouyinFilter Android V0.7.5" \
+              --notes "V0.7.5 完整完善分享结果确认与失败恢复，不改识别质量参数。继续取消跨视频分享坐标复用，每条视频重新通过Accessibility参数定位分享按钮，避免误点收藏。针对实机日志中发送后画面已回视频页但偶发丢失MainActivity事件造成的假失败，新增双通道确认：V7正常收到MainActivity仍直接成功；若事件缺失，则必须同时满足本轮确实打开过SharePanelDialog、联系人ImageView点击已确认、活动窗口回到分享前原视频windowId、所有Douyin窗口均无可见“分享给”面板、右侧分享参数重新出现且连续两次稳定，才补偿判定为成功，避免把早期失败误判为已发送。真正分享失败继续保持不重复点好友、不重复发送，并按原视频windowId安全恢复：已回原视频绝不按Back；仍处于分享/非源窗口才有限Back，面板仍可见时才点上方安全区域，恢复流程绝不滑动，下一条仍由主循环唯一上滑。18帧、300ms采样、两批9帧SigLIP流水线、CLIP女性Gate、A/B/C/D、全部阈值、约5MiB滚动日志均保持不变。"
           fi
