@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 无障碍服务只负责：悬浮条、上滑、提供系统手势能力。
- * 分享流程全部交给 ShareFlowV3，避免旧分享逻辑和新状态机互相干扰。
+ * 分享流程全部交给 ShareFlowV5，避免旧分享逻辑和新状态机互相干扰。
  */
 public class TapAccessibilityService extends AccessibilityService {
     private static volatile TapAccessibilityService instance;
@@ -52,7 +52,7 @@ public class TapAccessibilityService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
 
-        // Java 代码再补一次关键 flags，确保能读取资源 ID、非重要节点和多窗口。
+        // 再补一次关键 flags，确保能读取资源 ID、非重要节点和多窗口。
         try {
             AccessibilityServiceInfo info = getServiceInfo();
             if (info != null) {
@@ -97,26 +97,26 @@ public class TapAccessibilityService extends AccessibilityService {
         overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.HORIZONTAL);
         overlay.setGravity(Gravity.CENTER_VERTICAL);
-        overlay.setPadding(dp(5), dp(4), dp(6), dp(4));
+        overlay.setPadding(dp(4), dp(3), dp(5), dp(3));
         overlay.setBackgroundColor(Color.argb(188, 18, 18, 18));
 
         button = new TextView(this);
         button.setText("开始");
         button.setTextColor(Color.WHITE);
-        button.setTextSize(13);
+        button.setTextSize(12);
         button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(5), dp(4), dp(5), dp(4));
-        overlay.addView(button, new LinearLayout.LayoutParams(dp(58), dp(38)));
+        button.setPadding(dp(4), dp(3), dp(4), dp(3));
+        overlay.addView(button, new LinearLayout.LayoutParams(dp(52), dp(34)));
 
         status = new TextView(this);
         status.setText("就绪");
         status.setTextColor(Color.WHITE);
         status.setTextSize(10);
         status.setGravity(Gravity.CENTER_VERTICAL);
-        status.setPadding(dp(7), 0, dp(3), 0);
+        status.setPadding(dp(6), 0, dp(3), 0);
         status.setMaxLines(2);
         status.setEllipsize(TextUtils.TruncateAt.END);
-        overlay.addView(status, new LinearLayout.LayoutParams(dp(205), dp(42)));
+        overlay.addView(status, new LinearLayout.LayoutParams(dp(235), dp(44)));
 
         params = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
