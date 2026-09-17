@@ -30,6 +30,7 @@ public class AutomationController {
 
     private AutomationController(Context context) {
         this.context = context;
+        TraceLogger.init(context);
     }
 
     public boolean isRunning() { return running.get(); }
@@ -55,6 +56,7 @@ public class AutomationController {
         }
 
         running.set(true);
+        TraceLogger.critical("AUTO", "start");
         service.setOverlayRunning(true);
         TapAccessibilityService.setOverlayStatus("准备开始…");
         worker = new Thread(this::loop, "douyin-automation");
@@ -62,7 +64,8 @@ public class AutomationController {
     }
 
     public synchronized void stop() {
-        running.set(false);
+        boolean wasRunning = running.getAndSet(false);
+        if (wasRunning) TraceLogger.critical("AUTO", "stop");
         TapAccessibilityService service = TapAccessibilityService.getInstance();
         if (service != null) {
             service.setOverlayRunning(false);
@@ -140,10 +143,10 @@ public class AutomationController {
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜符合，准备打开分享…");
                     long shareStart = System.currentTimeMillis();
-                    boolean ok = ShareFlowV5.shareToTarget(service, target, running);
+                    boolean ok = ShareFlowV6.shareToTarget(service, target, running);
                     long shareMs = System.currentTimeMillis() - shareStart;
                     if (!ok && running.get()) {
-                        // ShareFlowV5 会保留明确的两行失败阶段日志；这里不能覆盖。
+                        // ShareFlowV6 会保留明确的两行失败阶段日志；这里不能覆盖。
                         running.set(false);
                         break;
                     }
@@ -157,6 +160,7 @@ public class AutomationController {
                 sleepInterruptible(BETWEEN_CYCLES_MS);
             }
         } catch (Throwable e) {
+            TraceLogger.critical("AUTO", "exception=" + shortError(e));
             TapAccessibilityService.setOverlayStatus("停下了｜" + shortError(e));
         } finally {
             running.set(false);
