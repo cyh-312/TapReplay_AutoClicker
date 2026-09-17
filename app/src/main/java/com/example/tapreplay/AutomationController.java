@@ -140,11 +140,10 @@ public class AutomationController {
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜符合，准备打开分享…");
                     long shareStart = System.currentTimeMillis();
-                    boolean ok = ShareFlowV4.shareToTarget(service, target, running);
+                    boolean ok = ShareFlowV5.shareToTarget(service, target, running);
                     long shareMs = System.currentTimeMillis() - shareStart;
                     if (!ok && running.get()) {
-                        // ShareFlowV4 会留下“卡在①~⑥哪一步”的详细日志。
-                        // 这里不要再用一条泛化提示把真正的失败位置覆盖掉。
+                        // ShareFlowV5 会保留明确的两行失败阶段日志；这里不能覆盖。
                         running.set(false);
                         break;
                     }
