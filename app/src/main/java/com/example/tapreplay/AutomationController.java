@@ -34,9 +34,14 @@ public class AutomationController {
     // SigLIP2 inference with capture of the second half. No duplicate model/session is created.
     private static final int SIGLIP_PIPELINE_BATCH = 9;
 
+    // Internal stability instrumentation / self-healing only. Recognition rules stay frozen.
+    private static final int CAPTURE_RECOVER_AFTER_MISSES = 3;
+    private static final int FULL_MEM_LOG_EVERY_CYCLES = 5;
+
     private AutomationController(Context context) {
         this.context = context;
         TraceLogger.init(context);
+        StabilityDiagnostics.logStartupExitInfo(context);
         siglipPipelineExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "siglip-pipeline");
             t.setDaemon(true);
@@ -67,7 +72,8 @@ public class AutomationController {
         }
 
         running.set(true);
-        TraceLogger.critical("AUTO", "start");
+        TraceLogger.critical("AUTO", "start internal-v0.7.6-stability");
+        StabilityDiagnostics.logSnapshot(context, 0, "start", true);
         service.setOverlayRunning(true);
         TapAccessibilityService.setOverlayStatus("准备开始…");
         worker = new Thread(this::loop, "douyin-automation");
@@ -90,6 +96,7 @@ public class AutomationController {
 
     private void loop() {
         TapAccessibilityService service = TapAccessibilityService.getInstance();
+        int cycle = 0;
         try {
             ModelEngine engine = ModelEngine.get(context);
             TapAccessibilityService.setOverlayStatus("正在加载识别模型…");
@@ -97,8 +104,8 @@ public class AutomationController {
             engine.ensureLoaded();
             long modelMs = System.currentTimeMillis() - modelStart;
             TapAccessibilityService.setOverlayStatus("模型好了｜" + engine.getBackendNote() + "｜" + formatMs(modelMs));
+            StabilityDiagnostics.logSnapshot(context, 0, "model_loaded", true);
 
-            int cycle = 0;
             while (running.get()) {
                 cycle++;
                 long cycleStart = System.currentTimeMillis();
@@ -111,7 +118,7 @@ public class AutomationController {
                 if (!running.get()) break;
 
                 TapAccessibilityService.setOverlayStatus("第" + cycle + "条｜正在取画面+并行初判…");
-                PipelineCapture capture = captureFramesPipelined(engine);
+                PipelineCapture capture = captureFramesPipelined(engine, cycle);
                 List<ModelEngine.FrameData> frames = capture.frames;
                 int sampled = frames.size();
 
@@ -124,6 +131,7 @@ public class AutomationController {
                 if (frames.size() < 2) {
                     drainPipeline(capture);
                     recycle(frames);
+                    StabilityDiagnostics.logSnapshot(context, cycle, "capture_insufficient", false);
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜画面没采够，先跳过｜" + formatMs(capture.captureMs));
                     continue;
@@ -137,6 +145,10 @@ public class AutomationController {
                 SiglipCollected siglip = collectSiglip(capture);
                 long clipStart = System.currentTimeMillis();
                 boolean fallback = false;
+
+                boolean fullMem = cycle == 1 || cycle % FULL_MEM_LOG_EVERY_CYCLES == 0;
+                StabilityDiagnostics.logSnapshot(context, cycle, "before_clip", fullMem);
+
                 try {
                     if (siglip.ok) {
                         decision = engine.analyzeWithSensual(frames, siglip.scores);
@@ -164,6 +176,9 @@ public class AutomationController {
                         " backend=" + engine.getBackendNote());
 
                 recycle(frames);
+                if (fullMem) {
+                    StabilityDiagnostics.logSnapshot(context, cycle, "after_recycle", true);
+                }
 
                 String friendly = friendlyResult(decision);
                 String detail = sampled + "帧｜女生" + decision.femaleFrames + "/" + decision.checkedFrames +
@@ -206,6 +221,7 @@ public class AutomationController {
             }
         } catch (Throwable e) {
             TraceLogger.critical("AUTO", "exception=" + shortError(e));
+            StabilityDiagnostics.logSnapshot(context, cycle, "caught_exception", true);
             TapAccessibilityService.setOverlayStatus("停下了｜" + shortError(e));
         } finally {
             running.set(false);
@@ -225,12 +241,13 @@ public class AutomationController {
         }
     }
 
-    private PipelineCapture captureFramesPipelined(ModelEngine engine) throws Exception {
+    private PipelineCapture captureFramesPipelined(ModelEngine engine, int cycle) throws Exception {
         ArrayList<ModelEngine.FrameData> out = new ArrayList<>();
         ArrayList<Future<SiglipBatchResult>> futures = new ArrayList<>();
         long started = System.currentTimeMillis();
         long next = started;
         int submittedUntil = 0;
+        int consecutiveMisses = 0;
         ScreenCaptureService cap = ScreenCaptureService.getInstance();
         if (cap == null) throw new IllegalStateException("屏幕捕获还没准备好");
 
@@ -246,8 +263,24 @@ public class AutomationController {
             try {
                 full = cap.captureLatest(1200);
                 out.add(engine.prepareFrame(full));
+                consecutiveMisses = 0;
             } catch (Throwable e) {
-                TraceLogger.log("CAPTURE", "frame miss=" + shortError(e));
+                consecutiveMisses++;
+                TraceLogger.log("CAPTURE",
+                        "cycle=" + cycle + " miss=" + consecutiveMisses +
+                                " err=" + shortError(e));
+
+                if (consecutiveMisses >= CAPTURE_RECOVER_AFTER_MISSES && running.get()) {
+                    StabilityDiagnostics.logSnapshot(context, cycle, "capture_stalled", true);
+                    boolean recovered = cap.recoverCapturePipeline();
+                    TraceLogger.critical("CAPTURE_RECOVER",
+                            "cycle=" + cycle + " afterMisses=" + consecutiveMisses +
+                                    " recovered=" + recovered);
+                    consecutiveMisses = 0;
+                    if (!recovered && !ScreenCaptureService.isReady()) {
+                        throw new IllegalStateException("屏幕捕获已失效，需要重新授权");
+                    }
+                }
             } finally {
                 if (full != null && !full.isRecycled()) full.recycle();
             }
