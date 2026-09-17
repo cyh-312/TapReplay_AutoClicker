@@ -23,11 +23,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify v0.7.3 quality and stability invariants
+      - name: Verify v0.7.4 share recovery and quality invariants
         shell: bash
         run: |
           set -euo pipefail
-          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV7.java'
+          FLOW7='app/src/main/java/com/example/tapreplay/ShareFlowV7.java'
+          FLOW8='app/src/main/java/com/example/tapreplay/ShareFlowV8.java'
           CTRL='app/src/main/java/com/example/tapreplay/AutomationController.java'
           MODEL='app/src/main/java/com/example/tapreplay/ModelEngine.java'
           UI='app/src/main/java/com/example/tapreplay/TapAccessibilityService.java'
@@ -48,7 +49,7 @@ jobs:
           grep -q 'BORDER_TOPK = 0.46f' "$MODEL"
           grep -q 'SENSUAL_INDEX = 4' "$MODEL"
 
-          # Pipeline only changes scheduling: two 9-frame SigLIP batches, same final CLIP/rules.
+          # Pipeline remains two 9-frame SigLIP batches with identical final CLIP/rules.
           grep -q 'SIGLIP_PIPELINE_BATCH = 9' "$CTRL"
           grep -q 'engine.scoreSiglip(batch)' "$CTRL"
           grep -q 'engine.analyzeWithSensual(frames, siglip.scores)' "$CTRL"
@@ -57,18 +58,30 @@ jobs:
           grep -q 'public float\[\] scoreSiglip' "$MODEL"
           grep -q 'public Decision analyzeWithSensual' "$MODEL"
 
-          # Share remains parameter-driven, exact-target and single-send, with the new settle/ack gate.
-          grep -q 'ShareFlowV7.shareToTarget' "$CTRL"
-          ! grep -q 'swipeContactRow' "$FLOW"
-          ! grep -q 'FORWARD_PAGES' "$FLOW"
-          ! grep -q 'RESET_SWIPES' "$FLOW"
-          grep -q 'findAccessibilityNodeInfosByText("分享")' "$FLOW"
-          grep -q 'PANEL_MIN_SETTLE_MS = 250L' "$FLOW"
-          grep -q 'TARGET_ACK_TIMEOUT_MS = 500L' "$FLOW"
-          grep -q 'TYPE_VIEW_CLICKED' "$FLOW"
-          grep -q 'waitForTargetAccepted' "$FLOW"
-          grep -q 'detectActiveSendButtonByPixels' "$FLOW"
-          grep -q 'main.MainActivity' "$FLOW"
+          # V8 is the active share entry point. V7 still owns the proven parameter/event flow.
+          grep -q 'ShareFlowV8.shareToTarget' "$CTRL"
+          ! grep -q 'ShareFlowV7.shareToTarget(service, target, running)' "$CTRL"
+          grep -q 'ShareFlowV7.shareToTarget(service, target, running)' "$FLOW8"
+          grep -q 'disableV7CoordinateCache' "$FLOW8"
+          grep -q 'cachedShareValid' "$FLOW8"
+          grep -q 'share panel visible -> BACK' "$FLOW8"
+          grep -q 'recover-outside' "$FLOW8"
+          grep -q 'Do not swipe here' "$FLOW8"
+          ! grep -q 'swipeNextVideo' "$FLOW8"
+          grep -q 'SHARE_SKIP' "$CTRL"
+          grep -q '分享失败，已跳过' "$CTRL"
+
+          # Proven V7 safety gates remain intact.
+          ! grep -q 'swipeContactRow' "$FLOW7"
+          ! grep -q 'FORWARD_PAGES' "$FLOW7"
+          ! grep -q 'RESET_SWIPES' "$FLOW7"
+          grep -q 'findAccessibilityNodeInfosByText("分享")' "$FLOW7"
+          grep -q 'PANEL_MIN_SETTLE_MS = 250L' "$FLOW7"
+          grep -q 'TARGET_ACK_TIMEOUT_MS = 500L' "$FLOW7"
+          grep -q 'TYPE_VIEW_CLICKED' "$FLOW7"
+          grep -q 'waitForTargetAccepted' "$FLOW7"
+          grep -q 'detectActiveSendButtonByPixels' "$FLOW7"
+          grep -q 'main.MainActivity' "$FLOW7"
           grep -q 'ShareFlowV7.onAccessibilityEvent' "$UI"
           grep -q 'TYPE_WINDOW_CONTENT_CHANGED) return' "$UI"
           grep -q 'status.setMaxLines(2)' "$UI"
@@ -76,9 +89,9 @@ jobs:
           # Log/storage limits remain fixed.
           grep -q 'MAX_FILE_BYTES = 1024L \* 1024L' "$LOG"
           grep -q 'MAX_BACKUPS = 4' "$LOG"
-          grep -q "versionName '0.7.3'" app/build.gradle
-          grep -q 'versionCode 10' app/build.gradle
-          echo 'v0.7.3 static quality/stability checks passed.'
+          grep -q "versionName '0.7.4'" app/build.gradle
+          grep -q 'versionCode 11' app/build.gradle
+          echo 'v0.7.4 static share-recovery/quality checks passed.'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,27 +130,27 @@ jobs:
 
       - name: Prepare named APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.3.apk
-          ls -lh DouyinFilter-v0.7.3.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.4.apk
+          ls -lh DouyinFilter-v0.7.4.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.3-debug-apk
-          path: DouyinFilter-v0.7.3.apk
+          name: DouyinFilter-v0.7.4-debug-apk
+          path: DouyinFilter-v0.7.4.apk
           compression-level: 0
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.7.3
+          TAG: douyin-filter-v0.7.4
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.7.3.apk --clobber
+            gh release upload "$TAG" DouyinFilter-v0.7.4.apk --clobber
           else
-            gh release create "$TAG" DouyinFilter-v0.7.3.apk \
+            gh release create "$TAG" DouyinFilter-v0.7.4.apk \
               --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.7.3" \
-              --notes "V0.7.3 在不改变识别质量参数的前提下做两项修复优化。分析侧保留18帧、300ms采样、SigLIP2/CLIP、女性Gate、A/B/C/D及全部阈值不变，将SigLIP2改为两批9帧流水线：前9帧采完即在单独推理线程运行，主线程继续采后9帧，最终仍按完整18帧分数选择原有CLIP检查帧并执行原规则；失败时自动回退旧的完整分析路径。新增PERF日志记录captureMs、siglipComputeMs、siglipTailWaitMs、clipDecisionMs和postCaptureMs用于实机评估。分享侧针对日志确认的偶发联系人点空：SharePanelDialog出现后仅在过快时补足250ms最小稳定年龄，点击精确联系人后必须收到抖音真实VIEW_CLICKED或选中后的FrameLayout窗口状态，才允许检测并点击红色发送按钮；仍不重复点联系人、不横滑联系人、不重复发送，发送后继续以MainActivity事件快速确认返回。日志上限仍约5MiB。"
+              --title "DouyinFilter Android V0.7.4" \
+              --notes "V0.7.4 聚焦分享稳定性，不改识别质量参数。每次分享前强制取消V0.7.3的跨视频分享坐标复用，重新通过当前视频右侧栏的Accessibility“分享”参数定位，避免不同视频工具栏布局变化时误点收藏。分享任一阶段失败不再终止自动化：不重复点好友、不重复发送，先在确认分享框仍可见时执行Back；若动画期间未关闭，再点视频上方安全空白区域；仍存在时最后再Back一次。恢复流程本身绝不滑动，下一条视频仍只由主循环执行一次正常上滑，避免双跳。分析侧继续保留18帧、300ms采样、两批9帧SigLIP流水线、原CLIP女性Gate、A/B/C/D及全部阈值，PERF日志和约5MiB滚动日志保持不变。"
           fi

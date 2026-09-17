@@ -184,12 +184,16 @@ public class AutomationController {
                     TapAccessibilityService.setOverlayStatus(
                             "第" + cycle + "条｜符合，准备打开分享…");
                     long shareStart = System.currentTimeMillis();
-                    boolean ok = ShareFlowV7.shareToTarget(service, target, running);
+                    boolean ok = ShareFlowV8.shareToTarget(service, target, running);
                     long shareMs = System.currentTimeMillis() - shareStart;
                     if (!ok && running.get()) {
-                        // ShareFlowV7 会保留明确的两行失败阶段日志；这里不能覆盖。
-                        running.set(false);
-                        break;
+                        // A single share failure is a per-video failure, not an automation failure.
+                        // ShareFlowV8 has already tried to dismiss the share UI. Do not swipe here:
+                        // the next loop iteration owns the one and only next-video swipe.
+                        TraceLogger.critical("SHARE_SKIP",
+                                "cycle=" + cycle + " shareMs=" + shareMs + " -> continue next video");
+                        TapAccessibilityService.setOverlayStatus(
+                                "第" + cycle + "条｜分享失败，已跳过\n继续下一条");
                     }
                     if (ok && running.get()) {
                         long totalMs = System.currentTimeMillis() - cycleStart;
