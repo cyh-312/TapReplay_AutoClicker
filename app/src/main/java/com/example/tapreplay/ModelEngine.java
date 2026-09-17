@@ -72,6 +72,16 @@ public class ModelEngine {
     private static final int CLIP_SIZE = 224;
     private static final int SENSUAL_INDEX = 4;
 
+    // Internal stability build: keep recognition semantics, but avoid repeated native allocations.
+    private static final int MAX_SIGLIP_INPUT_FRAMES = 20;
+    private static final int CLIP_INFER_BATCH = 12;
+    private static final int ORT_INTRA_OP_THREADS_MAX = 4;
+
+    private ShortBuffer siglipInputBuffer;
+    private ShortBuffer clipInputBuffer;
+    private final int[] siglipPixels = new int[SIG_SIZE * SIG_SIZE];
+    private final int[] clipPixels = new int[CLIP_SIZE * CLIP_SIZE];
+
     private static final float FEMALE_MIN_PROB = 0.40f;
     private static final float FEMALE_MIN_MARGIN = 0.04f;
     private static final float FEMALE_RATIO_PERSON = 0.60f;
@@ -110,11 +120,18 @@ public class ModelEngine {
 
     public synchronized void reset() {
         loaded = false;
-        closeSession(siglipSession);
-        closeSession(clipSession);
-        siglipSession = null;
-        clipSession = null;
-        backendNote = "等待重新加载";
+        lock.lock();
+        try {
+            closeSession(siglipSession);
+            closeSession(clipSession);
+            siglipSession = null;
+            clipSession = null;
+            siglipInputBuffer = null;
+            clipInputBuffer = null;
+            backendNote = "等待重新加载";
+        } finally {
+            lock.unlock();
+        }
     }
 
     public void ensureLoaded() throws Exception {
@@ -145,11 +162,14 @@ public class ModelEngine {
         OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
         opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         int cores = Runtime.getRuntime().availableProcessors();
-        opts.setIntraOpNumThreads(Math.max(2, Math.min(6, cores - 2)));
+        int intraThreads = Math.max(2, Math.min(ORT_INTRA_OP_THREADS_MAX, cores - 2));
+        opts.setIntraOpNumThreads(intraThreads);
         opts.setInterOpNumThreads(1);
         if (nnapi) {
             opts.addNnapi(EnumSet.of(NNAPIFlags.USE_FP16));
         }
+        TraceLogger.critical("MODEL",
+                "create session=" + asset + " nnapi=" + nnapi + " intraThreads=" + intraThreads);
 
         try (AssetFileDescriptor afd = context.getAssets().openFd(asset);
              FileInputStream fis = new FileInputStream(afd.getFileDescriptor())) {
@@ -346,38 +366,44 @@ public class ModelEngine {
 
     private float[] runSiglip(List<FrameData> frames) throws Exception {
         int n = frames.size();
-        ShortBuffer sb = allocateHalfBuffer(n * 3 * SIG_SIZE * SIG_SIZE);
-        for (int i = 0; i < n; i++) {
-            Bitmap b = frames.get(i).siglip;
-            int[] px = new int[SIG_SIZE * SIG_SIZE];
-            b.getPixels(px, 0, SIG_SIZE, 0, 0, SIG_SIZE, SIG_SIZE);
-            for (int c = 0; c < 3; c++) {
-                for (int p : px) {
-                    int v = c == 0 ? Color.red(p) : c == 1 ? Color.green(p) : Color.blue(p);
-                    float f = (v / 255f - 0.5f) / 0.5f;
-                    sb.put(floatToHalf(f));
-                }
-            }
+        if (n > MAX_SIGLIP_INPUT_FRAMES) {
+            throw new IllegalArgumentException("SigLIP batch too large: " + n);
         }
-        sb.flip();
 
-        long[] shape = {n, 3, SIG_SIZE, SIG_SIZE};
         lock.lock();
-        try (OnnxTensor input = OnnxTensor.createTensor(env, sb, shape, OnnxJavaType.FLOAT16);
-             OrtSession.Result result = siglipSession.run(Collections.singletonMap(
-                     siglipSession.getInputNames().iterator().next(), input))) {
-            OnnxTensor out = (OnnxTensor) result.get(0);
-            FloatBuffer fb = out.getFloatBuffer();
-            long[] outShape = ((TensorInfo)out.getInfo()).getShape();
-            int labels = (int)outShape[outShape.length - 1];
-            float[] scores = new float[n];
+        try {
+            int elements = n * 3 * SIG_SIZE * SIG_SIZE;
+            ShortBuffer sb = ensureSiglipInputBuffer(elements);
             for (int i = 0; i < n; i++) {
-                for (int j = 0; j < labels; j++) {
-                    float logit = fb.get();
-                    if (j == SENSUAL_INDEX) scores[i] = sigmoid(logit);
+                Bitmap b = frames.get(i).siglip;
+                b.getPixels(siglipPixels, 0, SIG_SIZE, 0, 0, SIG_SIZE, SIG_SIZE);
+                for (int c = 0; c < 3; c++) {
+                    for (int p : siglipPixels) {
+                        int v = c == 0 ? Color.red(p) : c == 1 ? Color.green(p) : Color.blue(p);
+                        float f = (v / 255f - 0.5f) / 0.5f;
+                        sb.put(floatToHalf(f));
+                    }
                 }
             }
-            return scores;
+            sb.flip();
+
+            long[] shape = {n, 3, SIG_SIZE, SIG_SIZE};
+            try (OnnxTensor input = OnnxTensor.createTensor(env, sb, shape, OnnxJavaType.FLOAT16);
+                 OrtSession.Result result = siglipSession.run(Collections.singletonMap(
+                         siglipSession.getInputNames().iterator().next(), input))) {
+                OnnxTensor out = (OnnxTensor) result.get(0);
+                FloatBuffer fb = out.getFloatBuffer();
+                long[] outShape = ((TensorInfo)out.getInfo()).getShape();
+                int labels = (int)outShape[outShape.length - 1];
+                float[] scores = new float[n];
+                for (int i = 0; i < n; i++) {
+                    for (int j = 0; j < labels; j++) {
+                        float logit = fb.get();
+                        if (j == SENSUAL_INDEX) scores[i] = sigmoid(logit);
+                    }
+                }
+                return scores;
+            }
         } finally {
             lock.unlock();
         }
@@ -385,35 +411,77 @@ public class ModelEngine {
 
     private float[][] runClip(List<Bitmap> images) throws Exception {
         int n = images.size();
-        ShortBuffer sb = allocateHalfBuffer(n * 3 * CLIP_SIZE * CLIP_SIZE);
+        float[][] probs = new float[n][3];
+        if (n == 0) return probs;
 
-        for (Bitmap b : images) {
-            int[] px = new int[CLIP_SIZE * CLIP_SIZE];
-            b.getPixels(px, 0, CLIP_SIZE, 0, 0, CLIP_SIZE, CLIP_SIZE);
-            for (int c = 0; c < 3; c++) {
-                for (int p : px) {
-                    int v = c == 0 ? Color.red(p) : c == 1 ? Color.green(p) : Color.blue(p);
-                    float f = (v / 255f - CLIP_MEAN[c]) / CLIP_STD[c];
-                    sb.put(floatToHalf(f));
+        lock.lock();
+        try {
+            for (int offset = 0; offset < n; offset += CLIP_INFER_BATCH) {
+                int batch = Math.min(CLIP_INFER_BATCH, n - offset);
+                int elements = batch * 3 * CLIP_SIZE * CLIP_SIZE;
+                ShortBuffer sb = ensureClipInputBuffer(elements);
+
+                for (int i = 0; i < batch; i++) {
+                    Bitmap b = images.get(offset + i);
+                    b.getPixels(clipPixels, 0, CLIP_SIZE, 0, 0, CLIP_SIZE, CLIP_SIZE);
+                    for (int c = 0; c < 3; c++) {
+                        for (int p : clipPixels) {
+                            int v = c == 0 ? Color.red(p) : c == 1 ? Color.green(p) : Color.blue(p);
+                            float f = (v / 255f - CLIP_MEAN[c]) / CLIP_STD[c];
+                            sb.put(floatToHalf(f));
+                        }
+                    }
+                }
+                sb.flip();
+
+                long[] shape = {batch, 3, CLIP_SIZE, CLIP_SIZE};
+                try (OnnxTensor input = OnnxTensor.createTensor(env, sb, shape, OnnxJavaType.FLOAT16);
+                     OrtSession.Result result = clipSession.run(Collections.singletonMap(
+                             clipSession.getInputNames().iterator().next(), input))) {
+                    OnnxTensor out = (OnnxTensor) result.get(0);
+                    FloatBuffer fb = out.getFloatBuffer();
+                    for (int i = 0; i < batch; i++) {
+                        for (int j = 0; j < 3; j++) probs[offset + i][j] = fb.get();
+                    }
                 }
             }
-        }
-        sb.flip();
-
-        long[] shape = {n, 3, CLIP_SIZE, CLIP_SIZE};
-        lock.lock();
-        try (OnnxTensor input = OnnxTensor.createTensor(env, sb, shape, OnnxJavaType.FLOAT16);
-             OrtSession.Result result = clipSession.run(Collections.singletonMap(
-                     clipSession.getInputNames().iterator().next(), input))) {
-            OnnxTensor out = (OnnxTensor) result.get(0);
-            FloatBuffer fb = out.getFloatBuffer();
-            float[][] probs = new float[n][3];
-            for (int i = 0; i < n; i++)
-                for (int j = 0; j < 3; j++) probs[i][j] = fb.get();
             return probs;
         } finally {
             lock.unlock();
         }
+    }
+
+    private ShortBuffer ensureSiglipInputBuffer(int requiredElements) {
+        int capacity = MAX_SIGLIP_INPUT_FRAMES * 3 * SIG_SIZE * SIG_SIZE;
+        if (requiredElements > capacity) {
+            throw new IllegalArgumentException("SigLIP input exceeds reusable buffer");
+        }
+        if (siglipInputBuffer == null) {
+            siglipInputBuffer = allocateHalfBuffer(capacity);
+            TraceLogger.critical("MEMBUF",
+                    "allocated reusable SigLIP FP16 direct buffer MiB=" +
+                            String.format(Locale.US, "%.1f", capacity * 2 / 1048576.0));
+        }
+        siglipInputBuffer.clear();
+        siglipInputBuffer.limit(requiredElements);
+        return siglipInputBuffer;
+    }
+
+    private ShortBuffer ensureClipInputBuffer(int requiredElements) {
+        int capacity = CLIP_INFER_BATCH * 3 * CLIP_SIZE * CLIP_SIZE;
+        if (requiredElements > capacity) {
+            throw new IllegalArgumentException("CLIP input exceeds reusable buffer");
+        }
+        if (clipInputBuffer == null) {
+            clipInputBuffer = allocateHalfBuffer(capacity);
+            TraceLogger.critical("MEMBUF",
+                    "allocated reusable CLIP FP16 direct buffer MiB=" +
+                            String.format(Locale.US, "%.1f", capacity * 2 / 1048576.0) +
+                            " batch=" + CLIP_INFER_BATCH);
+        }
+        clipInputBuffer.clear();
+        clipInputBuffer.limit(requiredElements);
+        return clipInputBuffer;
     }
 
     private ShortBuffer allocateHalfBuffer(int elements) {
