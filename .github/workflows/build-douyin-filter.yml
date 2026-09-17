@@ -23,24 +23,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify v0.7 share safety invariants
+      - name: Verify v0.7.1 share safety invariants
         shell: bash
         run: |
           set -euo pipefail
-          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV5.java'
+          FLOW='app/src/main/java/com/example/tapreplay/ShareFlowV6.java'
           CTRL='app/src/main/java/com/example/tapreplay/AutomationController.java'
           UI='app/src/main/java/com/example/tapreplay/TapAccessibilityService.java'
+          LOG='app/src/main/java/com/example/tapreplay/TraceLogger.java'
 
-          grep -q 'ShareFlowV5.shareToTarget' "$CTRL"
-          ! grep -q 'ShareFlowV4.shareToTarget' "$CTRL"
+          grep -q 'ShareFlowV6.shareToTarget' "$CTRL"
+          ! grep -q 'ShareFlowV5.shareToTarget' "$CTRL"
           ! grep -q 'swipeContactRow' "$FLOW"
           ! grep -q 'FORWARD_PAGES' "$FLOW"
           ! grep -q 'RESET_SWIPES' "$FLOW"
-          grep -q '只扫描当前可见联系人' "$FLOW"
+          grep -q 'Current visible contacts only' "$FLOW"
           grep -q 'detectActiveSendButtonByPixels' "$FLOW"
+          grep -q 'getRootInActiveWindow' "$FLOW"
+          grep -q 'n.isVisibleToUser()' "$FLOW"
+          grep -q 'waitReturnToVideo' "$FLOW"
           grep -q 'status.setMaxLines(2)' "$UI"
-          grep -q "versionName '0.7.0'" app/build.gradle
-          echo 'v0.7 static safety checks passed.'
+          grep -q 'MAX_FILE_BYTES = 1024L \* 1024L' "$LOG"
+          grep -q 'MAX_BACKUPS = 4' "$LOG"
+          grep -q "versionName '0.7.1'" app/build.gradle
+          echo 'v0.7.1 static safety checks passed.'
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,27 +85,27 @@ jobs:
 
       - name: Prepare named APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.apk
-          ls -lh DouyinFilter-v0.7.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.1.apk
+          ls -lh DouyinFilter-v0.7.1.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7-debug-apk
-          path: DouyinFilter-v0.7.apk
+          name: DouyinFilter-v0.7.1-debug-apk
+          path: DouyinFilter-v0.7.1.apk
           compression-level: 0
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: douyin-filter-v0.7.0
+          TAG: douyin-filter-v0.7.1
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" DouyinFilter-v0.7.apk --clobber
+            gh release upload "$TAG" DouyinFilter-v0.7.1.apk --clobber
           else
-            gh release create "$TAG" DouyinFilter-v0.7.apk \
+            gh release create "$TAG" DouyinFilter-v0.7.1.apk \
               --target "$GITHUB_SHA" \
-              --title "DouyinFilter Android V0.7" \
-              --notes "V0.7 稳定优先版：分享前清理上一次残留面板；只认右侧高可信分享按钮；必须精确确认“分享给”；联系人只扫描当前可见区域，彻底取消自动横滑；目标只允许精确匹配且最多点击一次；发送只认内存截图中已经亮起的大面积抖音红色按钮，不用灰色发送节点推断选中状态；发送只点一次，失败保留现场；悬浮日志固定两行显示①~⑥阶段和耗时。SigLIP2 + CLIP 模型、采样、女性门控、A/B/C/D 和阈值全部不变。"
+              --title "DouyinFilter Android V0.7.1" \
+              --notes "V0.7.1 分享流程修复与诊断版：分享按钮优先从当前活动抖音窗口查找并在命中右侧高可信节点后尽快结束扫描；分享面板只认当前活动窗口中可见的“分享给”，避免旧窗口/旧节点残留导致发送后假失败；发送后必须确认当前活动窗口回到带右侧高可信分享按钮的视频页才算完成，仍然绝不重复发送。新增固定应用目录滚动诊断日志，douyin.log + 4 个备份，每个约 1MiB，总量约 5MiB；记录①~⑥阶段、手势回调、Accessibility 窗口事件、扫描耗时和发送后确认过程。SigLIP2 + CLIP 模型、采样、女性门控、A/B/C/D 和阈值全部不变。"
           fi
