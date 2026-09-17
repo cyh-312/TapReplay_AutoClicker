@@ -34,6 +34,7 @@ public class ScreenCaptureService extends Service {
     private int width;
     private int height;
     private int density;
+    private int recoverCount;
 
     public static boolean isReady() {
         ScreenCaptureService s = instance;
@@ -84,9 +85,26 @@ public class ScreenCaptureService extends Service {
         projection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
-                stopProjection();
+                synchronized (ScreenCaptureService.this) {
+                    TraceLogger.critical("CAPTURE", "MediaProjection onStop from system");
+                    releaseCapturePipelineLocked();
+                    projection = null;
+                }
             }
         }, null);
+
+        try {
+            createCapturePipelineLocked();
+            TraceLogger.critical("CAPTURE",
+                    "projection started " + width + "x" + height + " density=" + density);
+        } catch (Throwable e) {
+            TraceLogger.critical("CAPTURE", "projection pipeline create failed=" + shortError(e));
+            stopProjection();
+        }
+    }
+
+    private void createCapturePipelineLocked() {
+        if (projection == null) throw new IllegalStateException("MediaProjection unavailable");
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
         imageReader.setOnImageAvailableListener(reader -> {
@@ -101,6 +119,51 @@ public class ScreenCaptureService extends Service {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),
                 null, null);
+
+        if (virtualDisplay == null) {
+            imageReader.close();
+            imageReader = null;
+            throw new IllegalStateException("VirtualDisplay create returned null");
+        }
+    }
+
+    private void releaseCapturePipelineLocked() {
+        if (virtualDisplay != null) {
+            try { virtualDisplay.release(); } catch (Throwable ignored) {}
+            virtualDisplay = null;
+        }
+        if (imageReader != null) {
+            try { imageReader.close(); } catch (Throwable ignored) {}
+            imageReader = null;
+        }
+        synchronized (imageLock) {
+            imageLock.notifyAll();
+        }
+    }
+
+    /**
+     * Rebuild only ImageReader + VirtualDisplay while keeping the existing MediaProjection token.
+     * This is used after several consecutive capture timeouts and does not require a new consent
+     * dialog as long as the system has not stopped the projection itself.
+     */
+    public synchronized boolean recoverCapturePipeline() {
+        if (projection == null) {
+            TraceLogger.critical("CAPTURE_RECOVER", "skip: projection already stopped");
+            return false;
+        }
+
+        try {
+            releaseCapturePipelineLocked();
+            createCapturePipelineLocked();
+            recoverCount++;
+            TraceLogger.critical("CAPTURE_RECOVER",
+                    "success count=" + recoverCount + " size=" + width + "x" + height);
+            return true;
+        } catch (Throwable e) {
+            TraceLogger.critical("CAPTURE_RECOVER", "failed=" + shortError(e));
+            releaseCapturePipelineLocked();
+            return false;
+        }
     }
 
     private void updateDisplaySize() {
@@ -129,15 +192,31 @@ public class ScreenCaptureService extends Service {
     }
 
     public Bitmap captureLatest(long timeoutMs) throws Exception {
-        if (!isReady()) throw new IllegalStateException("屏幕捕获尚未就绪");
-        long deadline = System.currentTimeMillis() + timeoutMs;
+        ImageReader reader;
+        synchronized (this) {
+            if (projection == null || imageReader == null) {
+                throw new IllegalStateException("屏幕捕获尚未就绪");
+            }
+            reader = imageReader;
+        }
 
-        Image image = imageReader.acquireLatestImage();
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        Image image;
+        try {
+            image = reader.acquireLatestImage();
+        } catch (IllegalStateException e) {
+            throw new RuntimeException("ImageReader不可用", e);
+        }
+
         while (image == null && System.currentTimeMillis() < deadline) {
             synchronized (imageLock) {
                 imageLock.wait(Math.min(80, Math.max(1, deadline - System.currentTimeMillis())));
             }
-            image = imageReader.acquireLatestImage();
+            try {
+                image = reader.acquireLatestImage();
+            } catch (IllegalStateException e) {
+                throw new RuntimeException("ImageReader已关闭", e);
+            }
         }
         if (image == null) throw new RuntimeException("等待屏幕帧超时");
 
@@ -160,19 +239,13 @@ public class ScreenCaptureService extends Service {
     }
 
     private synchronized void stopProjection() {
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-        }
-        if (imageReader != null) {
-            imageReader.close();
-            imageReader = null;
-        }
-        if (projection != null) {
+        MediaProjection oldProjection = projection;
+        projection = null;
+        releaseCapturePipelineLocked();
+        if (oldProjection != null) {
             try {
-                projection.stop();
+                oldProjection.stop();
             } catch (Throwable ignored) {}
-            projection = null;
         }
     }
 
@@ -206,5 +279,12 @@ public class ScreenCaptureService extends Service {
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
                 .setOngoing(true)
                 .build();
+    }
+
+    private String shortError(Throwable e) {
+        if (e == null) return "unknown";
+        String s = e.getMessage();
+        if (s == null || s.trim().isEmpty()) s = e.getClass().getSimpleName();
+        return s.length() > 100 ? s.substring(0, 100) : s;
     }
 }
