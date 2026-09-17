@@ -18,23 +18,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * V0.7.5 share guard around the proven V7 parameter-driven flow.
+ * V0.7.5 robust share guard around the proven V7 parameter-driven flow.
  *
- * Goals:
- * 1) Never reuse a right-rail share coordinate across videos.
- * 2) Reconcile the known false-negative case where Send succeeds and the video page is visibly
- *    restored, but the MainActivity WINDOW_STATE_CHANGED event is missed.
- * 3) Treat a real per-video share failure as recoverable: dismiss any remaining share UI and let
- *    AutomationController continue to the next video. This class never swipes videos itself.
- *
- * V7 still owns the exact-target, one-target-tap, pixel-confirmed-send and one-send-tap rules.
+ * V7 owns exact target matching, one target tap, pixel-confirmed Send and one Send tap.
+ * This guard adds cross-video coordinate invalidation, missed-event success reconciliation,
+ * and bounded per-video failure recovery without ever swiping videos itself.
  */
 public final class ShareFlowV8 {
     private ShareFlowV8() {}
 
     private static final String DOUYIN_PACKAGE = "com.ss.android.ugc.aweme";
-    private static final long RECONCILE_WAIT_MS = 360L;
-    private static final long RECOVER_WAIT_MS = 750L;
+    private static final long RECONCILE_WAIT_MS = 750L;
+    private static final long PASSIVE_RECOVER_WAIT_MS = 450L;
+    private static final long RECOVER_WAIT_MS = 800L;
+    private static final int VIDEO_READY_STABLE_COUNT = 2;
 
     public static boolean shareToTarget(
             TapAccessibilityService service,
@@ -43,12 +40,11 @@ public final class ShareFlowV8 {
 
         if (service == null || running == null || !running.get()) return false;
 
-        // Cross-video coordinate reuse caused occasional clicks on 收藏 when a video's right rail
-        // shifted vertically. V7 may still cache internally, but we invalidate it before every
-        // distinct video share attempt so each video is re-located by Accessibility parameters.
+        // Never reuse a right-rail coordinate across videos. Different Douyin videos can shift
+        // 收藏/分享 vertically; stale coordinates were the cause of occasional 收藏 clicks.
         if (!disableV7CoordinateCache()) {
             TraceLogger.critical("SHARE_GUARD", "cannot disable V7 coordinate cache; skip share safely");
-            TapAccessibilityService.setOverlayStatus("分享跳过｜无法关闭坐标缓存");
+            TapAccessibilityService.setOverlayStatus("分享跳过｜坐标保护未就绪");
             return false;
         }
 
@@ -68,27 +64,25 @@ public final class ShareFlowV8 {
 
         if (ok || !running.get()) return ok;
 
-        // V7 intentionally trusts MainActivity WINDOW_STATE_CHANGED after Send. On the captured
-        // Huawei/Douyin runs that event is occasionally absent even though the sheet has closed and
-        // the original video page is already back. Reconcile that exact case with independent,
-        // parameter-based evidence before declaring a real failure.
+        // V7 may have shown a failure line because MainActivity's event was missed. Replace that
+        // transient line immediately while we perform an independent UI-state reconciliation.
+        TapAccessibilityService.setOverlayStatus("⑥发送｜补充确认主界面\n不会重复发送");
+
         if (reconcilePostSendSuccess(service, running, snapshot)) {
             TraceLogger.critical("POST_SEND_RECONCILE",
-                    "success without MainActivity event; sourceWindowId=" + snapshot.sourceWindowId);
-            TapAccessibilityService.setOverlayStatus(
-                    "分享完成✓\n主界面已恢复（事件补偿）");
+                    "success by stable video-page parameters sourceWindowId=" + snapshot.sourceWindowId);
+            TapAccessibilityService.setOverlayStatus("分享完成✓\n主界面已恢复（状态补偿）");
             SystemClock.sleep(260L);
             return true;
         }
 
-        boolean recovered = recoverToVideo(service, running, snapshot.sourceWindowId);
-        TraceLogger.critical("RECOVER",
-                "shareFailed sourceWindowId=" + snapshot.sourceWindowId + " recovered=" + recovered);
+        boolean recovered = recoverToVideo(service, running);
+        TraceLogger.critical("RECOVER", "shareFailed recovered=" + recovered);
         if (running.get()) {
             TapAccessibilityService.setOverlayStatus(
                     recovered
-                            ? "分享失败｜已退出分享框\n继续下一条"
-                            : "分享失败｜恢复未完全确认\n仍尝试下一条");
+                            ? "分享失败｜已恢复视频页\n继续下一条"
+                            : "分享失败｜已执行恢复\n继续下一条");
         }
         return false;
     }
@@ -101,22 +95,18 @@ public final class ShareFlowV8 {
     }
 
     /**
-     * Secondary success path used only after V7 already returned false.
-     *
-     * It deliberately requires several independent facts so an early-stage failure cannot be
-     * misclassified as a successful send:
-     * - this attempt opened a new SharePanelDialog;
-     * - this attempt produced a target ImageView click inside that share-dialog window;
-     * - the active Douyin window is back to the exact pre-share video window id;
-     * - no visible "分享给" panel remains in any Douyin window;
-     * - the video's right-rail "分享" parameter is visible again.
+     * Used only after V7 returned false. To avoid treating an early-stage failure as a successful
+     * Send, first require evidence that this attempt opened SharePanelDialog and really clicked the
+     * target ImageView. Then accept a restored video page independently of windowId:
+     *   no visible 分享给 panel + active Douyin root + real right-rail 分享 parameter.
+     * Two consecutive observations are required for stability.
      */
     private static boolean reconcilePostSendSuccess(
             TapAccessibilityService service,
             AtomicBoolean running,
             AttemptSnapshot snapshot) {
 
-        if (snapshot.sourceWindowId < 0 || !running.get()) return false;
+        if (!running.get()) return false;
 
         long dialogAfter = readV7Long("lastShareDialogUptimeMs", -1L);
         long clickAfter = readV7AtomicLong("VIEW_CLICK_SEQ", -1L);
@@ -133,136 +123,119 @@ public final class ShareFlowV8 {
         TraceLogger.log("POST_SEND_RECONCILE",
                 "evidence dialogOpened=" + dialogOpenedThisAttempt +
                 " targetClick=" + targetClickThisAttempt +
+                " sourceWindowId=" + snapshot.sourceWindowId +
                 " dialogWindowId=" + shareDialogWindowId +
-                " lastClickWindowId=" + lastClickWindowId +
-                " lastClickClass=" + lastClickClass);
+                " lastClickWindowId=" + lastClickWindowId);
 
         if (!dialogOpenedThisAttempt || !targetClickThisAttempt) return false;
-
-        long end = SystemClock.uptimeMillis() + RECONCILE_WAIT_MS;
-        int stable = 0;
-        while (running.get() && SystemClock.uptimeMillis() < end) {
-            boolean sourceActive = isSourceWindowActive(service, snapshot.sourceWindowId);
-            if (!sourceActive) {
-                stable = 0;
-                SystemClock.sleep(45L);
-                continue;
-            }
-
-            boolean panelGone = !isSharePanelVisibleAnyWindow(service);
-            boolean shareVisible = panelGone &&
-                    hasRightRailShareParameter(service, snapshot.sourceWindowId);
-
-            TraceLogger.log("POST_SEND_RECONCILE",
-                    "sourceActive=true panelGone=" + panelGone +
-                    " rightRailShare=" + shareVisible);
-
-            if (panelGone && shareVisible) {
-                stable++;
-                if (stable >= 2) return true;
-            } else {
-                stable = 0;
-            }
-            SystemClock.sleep(45L);
-        }
-        return false;
+        return waitForStableVideoPage(service, running, RECONCILE_WAIT_MS, "POST_SEND_RECONCILE");
     }
 
     /**
-     * Recover a real failed share without ever swiping. The next-video swipe belongs only to
-     * AutomationController at the beginning of the next cycle, preventing double skips.
+     * A real share failure is per-video, not fatal to the automation. Recovery never sends again
+     * and never swipes. It first waits passively because Douyin may still be finishing a close
+     * animation, then uses bounded Back/outside-tap fallbacks only while share UI remains.
      */
     private static boolean recoverToVideo(
             TapAccessibilityService service,
-            AtomicBoolean running,
-            int sourceWindowId) {
+            AtomicBoolean running) {
 
         if (!running.get()) return false;
-        TraceLogger.critical("RECOVER", "begin sourceWindowId=" + sourceWindowId);
+        TraceLogger.critical("RECOVER", "begin");
 
-        // If the original video window is already active, do not press Back. This is the most
-        // important guard against accidentally navigating away from Douyin after a late UI settle.
-        if (sourceWindowId >= 0 && isSourceWindowActive(service, sourceWindowId)) {
-            TraceLogger.log("RECOVER", "source video already active");
-            SystemClock.sleep(160L);
+        // Late MainActivity/UI close: do nothing while Douyin finishes by itself.
+        if (waitForStableVideoPage(service, running, PASSIVE_RECOVER_WAIT_MS, "RECOVER_PASSIVE")) {
+            TraceLogger.log("RECOVER", "video page restored passively");
             return true;
         }
 
         if (isKeyboardVisible(service) && running.get()) {
             TraceLogger.log("RECOVER", "keyboard visible -> BACK");
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
-            SystemClock.sleep(220L);
-            if (sourceWindowId >= 0 && isSourceWindowActive(service, sourceWindowId)) return true;
+            if (waitForStableVideoPage(service, running, RECOVER_WAIT_MS, "RECOVER_KEYBOARD")) {
+                SystemClock.sleep(160L);
+                return true;
+            }
         }
 
         boolean panelVisible = isSharePanelVisibleAnyWindow(service);
-        int activeId = getActiveDouyinWindowId(service);
-
-        // If the top Douyin window is not the original video window, it is still a modal/share
-        // layer from this attempt. One bounded Back is safer than blindly tapping or swiping.
-        if (running.get() &&
-                (panelVisible || (sourceWindowId >= 0 && activeId >= 0 && activeId != sourceWindowId))) {
-            TraceLogger.log("RECOVER",
-                    "modal/share layer -> BACK panelVisible=" + panelVisible + " activeId=" + activeId);
+        if (panelVisible && running.get()) {
+            TraceLogger.log("RECOVER", "share panel visible -> BACK");
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
-            if (waitForSourceVideo(service, running, sourceWindowId, RECOVER_WAIT_MS)) {
-                SystemClock.sleep(180L);
+            if (waitForStableVideoPage(service, running, RECOVER_WAIT_MS, "RECOVER_BACK1")) {
+                SystemClock.sleep(160L);
                 return true;
             }
         }
 
         if (!running.get()) return false;
 
-        // A bottom sheet may ignore Back during its closing animation. Only use an outside tap if
-        // the share panel is still positively visible in a Douyin window.
+        // Some bottom sheets ignore Back while animating. Only tap outside when 分享给 is still
+        // positively visible; never blind-tap an already restored video page.
         if (isSharePanelVisibleAnyWindow(service)) {
             int w = service.getResources().getDisplayMetrics().widthPixels;
             int h = service.getResources().getDisplayMetrics().heightPixels;
             float x = w * 0.50f;
-            float y = h * 0.36f;
-            TraceLogger.log("RECOVER", "panel still visible -> safe outside tap x=" +
+            float y = h * 0.34f;
+            TraceLogger.log("RECOVER", "panel still visible -> outside tap x=" +
                     Math.round(x) + " y=" + Math.round(y));
             tap(service, x, y, 55L, "recover-outside");
-            if (waitForSourceVideo(service, running, sourceWindowId, RECOVER_WAIT_MS)) {
-                SystemClock.sleep(180L);
+            if (waitForStableVideoPage(service, running, RECOVER_WAIT_MS, "RECOVER_OUTSIDE")) {
+                SystemClock.sleep(160L);
                 return true;
             }
         }
 
         if (!running.get()) return false;
 
-        // Final bounded fallback only when a non-source Douyin window is still on top. Never Back
-        // from the already-restored source video window.
-        activeId = getActiveDouyinWindowId(service);
-        if (sourceWindowId >= 0 && activeId >= 0 && activeId != sourceWindowId) {
-            TraceLogger.log("RECOVER", "non-source window remains -> final BACK activeId=" + activeId);
+        // One final bounded Back only if the share panel is still demonstrably present.
+        if (isSharePanelVisibleAnyWindow(service)) {
+            TraceLogger.log("RECOVER", "panel remains -> final BACK");
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
-            if (waitForSourceVideo(service, running, sourceWindowId, RECOVER_WAIT_MS)) {
-                SystemClock.sleep(180L);
+            if (waitForStableVideoPage(service, running, RECOVER_WAIT_MS, "RECOVER_BACK2")) {
+                SystemClock.sleep(160L);
                 return true;
             }
         }
 
-        if (sourceWindowId >= 0) return isSourceWindowActive(service, sourceWindowId);
-        return !isSharePanelVisibleAnyWindow(service) && isDouyinActive(service);
+        return isVideoPageReady(service);
     }
 
-    private static boolean waitForSourceVideo(
+    private static boolean waitForStableVideoPage(
             TapAccessibilityService service,
             AtomicBoolean running,
-            int sourceWindowId,
-            long timeoutMs) {
+            long timeoutMs,
+            String logTag) {
         long end = SystemClock.uptimeMillis() + timeoutMs;
+        int stable = 0;
         while (running.get() && SystemClock.uptimeMillis() < end) {
-            if (sourceWindowId >= 0) {
-                if (isSourceWindowActive(service, sourceWindowId)) return true;
-            } else if (!isSharePanelVisibleAnyWindow(service) && isDouyinActive(service)) {
-                return true;
+            boolean ready = isVideoPageReady(service);
+            TraceLogger.log(logTag, "videoReady=" + ready + " stable=" + stable);
+            if (ready) {
+                stable++;
+                if (stable >= VIDEO_READY_STABLE_COUNT) return true;
+            } else {
+                stable = 0;
             }
-            SystemClock.sleep(45L);
+            SystemClock.sleep(55L);
         }
-        if (sourceWindowId >= 0) return isSourceWindowActive(service, sourceWindowId);
-        return !isSharePanelVisibleAnyWindow(service) && isDouyinActive(service);
+        return stable >= VIDEO_READY_STABLE_COUNT || isVideoPageReady(service);
+    }
+
+    /**
+     * Window ids are intentionally not part of this definition. Douyin can recreate the window
+     * while returning to the same feed video. These three facts represent what we actually need:
+     * Douyin is active, the share sheet is gone, and the feed right-rail 分享 control is visible.
+     */
+    private static boolean isVideoPageReady(TapAccessibilityService service) {
+        if (isSharePanelVisibleAnyWindow(service)) return false;
+        AccessibilityNodeInfo root = getActiveDouyinRoot(service);
+        if (root == null) return false;
+        try {
+            return hasRightRailShareParameterInRoot(service, root);
+        } finally {
+            safeRecycle(root);
+        }
     }
 
     private static boolean disableV7CoordinateCache() {
@@ -283,17 +256,6 @@ public final class ShareFlowV8 {
         }
     }
 
-    private static boolean isSourceWindowActive(TapAccessibilityService service, int sourceWindowId) {
-        if (sourceWindowId < 0) return false;
-        AccessibilityNodeInfo root = getActiveDouyinRoot(service);
-        if (root == null) return false;
-        try {
-            return root.getWindowId() == sourceWindowId;
-        } finally {
-            safeRecycle(root);
-        }
-    }
-
     private static int getActiveDouyinWindowId(TapAccessibilityService service) {
         AccessibilityNodeInfo root = getActiveDouyinRoot(service);
         if (root == null) return -1;
@@ -304,7 +266,7 @@ public final class ShareFlowV8 {
         }
     }
 
-    /** Query all Douyin windows because the visible SharePanelDialog may not be the active root. */
+    /** Check all Douyin windows because SharePanelDialog can sit above the active feed root. */
     private static boolean isSharePanelVisibleAnyWindow(TapAccessibilityService service) {
         try {
             List<AccessibilityWindowInfo> windows = service.getWindows();
@@ -361,15 +323,11 @@ public final class ShareFlowV8 {
         return false;
     }
 
-    /** Cheap parameter query; no full video-tree traversal. */
-    private static boolean hasRightRailShareParameter(
+    private static boolean hasRightRailShareParameterInRoot(
             TapAccessibilityService service,
-            int expectedWindowId) {
-        AccessibilityNodeInfo root = getActiveDouyinRoot(service);
-        if (root == null) return false;
+            AccessibilityNodeInfo root) {
         List<AccessibilityNodeInfo> hits = null;
         try {
-            if (expectedWindowId >= 0 && root.getWindowId() != expectedWindowId) return false;
             int w = service.getResources().getDisplayMetrics().widthPixels;
             int h = service.getResources().getDisplayMetrics().heightPixels;
             hits = root.findAccessibilityNodeInfosByText("分享");
@@ -396,11 +354,10 @@ public final class ShareFlowV8 {
             }
             return false;
         } catch (Throwable e) {
-            TraceLogger.log("POST_SEND_RECONCILE", "share parameter check error=" + shortThrowable(e));
+            TraceLogger.log("VIDEO_READY", "share parameter check error=" + shortThrowable(e));
             return false;
         } finally {
             if (hits != null) for (AccessibilityNodeInfo n : hits) safeRecycle(n);
-            safeRecycle(root);
         }
     }
 
@@ -415,13 +372,6 @@ public final class ShareFlowV8 {
                 s.contains("写评论") ||
                 s.contains("发表评论") ||
                 s.startsWith("私信");
-    }
-
-    private static boolean isDouyinActive(TapAccessibilityService service) {
-        AccessibilityNodeInfo root = getActiveDouyinRoot(service);
-        if (root == null) return false;
-        safeRecycle(root);
-        return true;
     }
 
     private static AccessibilityNodeInfo getActiveDouyinRoot(TapAccessibilityService service) {
@@ -441,9 +391,7 @@ public final class ShareFlowV8 {
                     AccessibilityNodeInfo root = null;
                     try {
                         root = window.getRoot();
-                        if (root != null && DOUYIN_PACKAGE.equals(text(root.getPackageName()))) {
-                            return root;
-                        }
+                        if (root != null && DOUYIN_PACKAGE.equals(text(root.getPackageName()))) return root;
                     } catch (Throwable ignored) {
                     } finally {
                         if (root != null && !DOUYIN_PACKAGE.equals(text(root.getPackageName()))) {
@@ -462,9 +410,7 @@ public final class ShareFlowV8 {
             List<AccessibilityWindowInfo> windows = service.getWindows();
             if (windows == null) return false;
             for (AccessibilityWindowInfo window : windows) {
-                if (window != null && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
-                    return true;
-                }
+                if (window != null && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
             }
         } catch (Throwable ignored) {}
         return false;
