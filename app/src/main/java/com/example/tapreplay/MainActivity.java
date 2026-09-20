@@ -44,7 +44,7 @@ public class MainActivity extends Activity {
         scroll.addView(box);
 
         TextView title = new TextView(this);
-        title.setText("抖音筛选分享 · V0.7.6 internal.2");
+        title.setText("抖音筛选分享 · V0.7.6 internal.3");
         title.setTextSize(22);
         box.addView(title);
 
