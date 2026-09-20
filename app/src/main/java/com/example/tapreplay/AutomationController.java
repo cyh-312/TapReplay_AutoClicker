@@ -142,6 +142,8 @@ public class AutomationController {
                 SiglipCollected siglip = collectSiglip(capture);
                 long clipStart = System.currentTimeMillis();
                 boolean fallback = false;
+                long clipDecisionMs = 0L;
+                long postCaptureMs = 0L;
                 boolean fullMem = cycle == 1 || cycle % FULL_MEM_LOG_EVERY_CYCLES == 0;
                 StabilityDiagnostics.logSnapshot(context, cycle, "before_clip", fullMem);
                 try {
@@ -153,8 +155,8 @@ public class AutomationController {
                         decision = engine.analyze(frames);
                     }
 
-                    long clipDecisionMs = System.currentTimeMillis() - clipStart;
-                    long postCaptureMs = System.currentTimeMillis() - postCaptureStart;
+                    clipDecisionMs = System.currentTimeMillis() - clipStart;
+                    postCaptureMs = System.currentTimeMillis() - postCaptureStart;
 
                     TraceLogger.critical("PERF",
                             "cycle=" + cycle +
