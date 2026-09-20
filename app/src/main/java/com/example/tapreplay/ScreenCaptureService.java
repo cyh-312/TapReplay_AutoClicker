@@ -38,7 +38,8 @@ public class ScreenCaptureService extends Service {
 
     public static boolean isReady() {
         ScreenCaptureService s = instance;
-        return s != null && s.projection != null && s.imageReader != null;
+        return s != null && s.projection != null &&
+                s.imageReader != null && s.virtualDisplay != null;
     }
 
     public static ScreenCaptureService getInstance() {
@@ -79,22 +80,34 @@ public class ScreenCaptureService extends Service {
 
         updateDisplaySize();
 
-        projection = m.getMediaProjection(resultCode, data);
-        if (projection == null) return;
+        MediaProjection freshProjection = m.getMediaProjection(resultCode, data);
+        if (freshProjection == null) return;
 
-        projection.registerCallback(new MediaProjection.Callback() {
+        // IMPORTANT: each authorization creates a brand-new MediaProjection session.
+        // The callback captures its owner so an asynchronous onStop() from an older session
+        // can never tear down a newly authorized session.
+        final MediaProjection owner = freshProjection;
+        projection = owner;
+        owner.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
                 synchronized (ScreenCaptureService.this) {
+                    if (projection != owner) {
+                        TraceLogger.log("CAPTURE",
+                                "ignored stale MediaProjection onStop from previous session");
+                        return;
+                    }
                     TraceLogger.critical("CAPTURE", "MediaProjection onStop from system");
-                    releaseCapturePipelineLocked();
                     projection = null;
+                    releaseCapturePipelineLocked();
+                    updateNotification("屏幕采集已停止，请重新授权");
                 }
             }
         }, null);
 
         try {
             createCapturePipelineLocked();
+            updateNotification("正在提供内存屏幕采集");
             TraceLogger.critical("CAPTURE",
                     "projection started " + width + "x" + height + " density=" + density);
         } catch (Throwable e) {
@@ -142,28 +155,17 @@ public class ScreenCaptureService extends Service {
     }
 
     /**
-     * Rebuild only ImageReader + VirtualDisplay while keeping the existing MediaProjection token.
-     * This is used after several consecutive capture timeouts and does not require a new consent
-     * dialog as long as the system has not stopped the projection itself.
+     * Android 14+ treats a MediaProjection authorization as a one-shot capture session:
+     * createVirtualDisplay() must not be called again on the same MediaProjection instance.
+     * If frame delivery stalls for a sustained period, retire the whole session and require
+     * a fresh system consent result instead of trying to rebuild VirtualDisplay in-place.
      */
-    public synchronized boolean recoverCapturePipeline() {
-        if (projection == null) {
-            TraceLogger.critical("CAPTURE_RECOVER", "skip: projection already stopped");
-            return false;
-        }
-
-        try {
-            releaseCapturePipelineLocked();
-            createCapturePipelineLocked();
-            recoverCount++;
-            TraceLogger.critical("CAPTURE_RECOVER",
-                    "success count=" + recoverCount + " size=" + width + "x" + height);
-            return true;
-        } catch (Throwable e) {
-            TraceLogger.critical("CAPTURE_RECOVER", "failed=" + shortError(e));
-            releaseCapturePipelineLocked();
-            return false;
-        }
+    public synchronized void invalidateForReauthorization(String reason) {
+        recoverCount++;
+        TraceLogger.critical("CAPTURE_REAUTH",
+                "retire projection count=" + recoverCount + " reason=" + reason);
+        stopProjection();
+        updateNotification("屏幕采集需要重新授权");
     }
 
     private void updateDisplaySize() {
@@ -268,6 +270,13 @@ public class ScreenCaptureService extends Service {
                     CHANNEL_ID, "屏幕采集", NotificationManager.IMPORTANCE_LOW);
             nm.createNotificationChannel(ch);
         }
+    }
+
+    private void updateNotification(String text) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.notify(100, buildNotification(text));
+        } catch (Throwable ignored) {}
     }
 
     private Notification buildNotification(String text) {
