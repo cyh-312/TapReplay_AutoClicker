@@ -58,6 +58,10 @@ jobs:
           ! grep -q 'swipeNextVideo' "$FLOW8"
           grep -q 'waitForTargetAccepted' "$FLOW7"
           grep -q 'detectActiveSendButtonByPixels' "$FLOW7"
+          # Freeze the proven released v0.7.5 sharing path byte-for-byte.
+          test "$(git hash-object "$FLOW7")" = "b6d62a28ef94ad83115f2a41f114bd3f978ce1aa"
+          test "$(git hash-object "$FLOW8")" = "e6ace869b400ac771bf7dbaf6e7426e46ed9387a"
+          test "$(git hash-object app/src/main/java/com/example/tapreplay/TapAccessibilityService.java)" = "5e4ff717db6a422a84c1bf6d2b65ab611c0462be"
 
           # Internal stability changes.
           grep -q 'CLIP_INFER_BATCH = 12' "$MODEL"
@@ -73,8 +77,8 @@ jobs:
           grep -q 'getNativeHeapAllocatedSize' "$DIAG"
           grep -q 'getCurrentThermalStatus' "$DIAG"
 
-          grep -q "versionName '0.7.6-internal.2'" app/build.gradle
-          grep -q 'versionCode 14' app/build.gradle
+          grep -q "versionName '0.7.6-internal.3'" app/build.gradle
+          grep -q 'versionCode 15' app/build.gradle
           echo 'Internal stability invariants passed.'
 
       - name: Set up Python
@@ -139,14 +143,14 @@ jobs:
 
       - name: Prepare internal APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.6-internal2.apk
-          sha256sum DouyinFilter-v0.7.6-internal2.apk
-          ls -lh DouyinFilter-v0.7.6-internal2.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.6-internal3.apk
+          sha256sum DouyinFilter-v0.7.6-internal3.apk
+          ls -lh DouyinFilter-v0.7.6-internal3.apk
 
       - name: Upload internal APK artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.6-internal2-debug-apk
-          path: DouyinFilter-v0.7.6-internal2.apk
+          name: DouyinFilter-v0.7.6-internal3-debug-apk
+          path: DouyinFilter-v0.7.6-internal3.apk
           compression-level: 0
           retention-days: 14
