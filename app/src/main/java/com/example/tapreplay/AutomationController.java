@@ -34,8 +34,10 @@ public class AutomationController {
     // SigLIP2 inference with capture of the second half. No duplicate model/session is created.
     private static final int SIGLIP_PIPELINE_BATCH = 9;
 
-    // Internal stability instrumentation / self-healing only. Recognition rules stay frozen.
-    private static final int CAPTURE_RECOVER_AFTER_MISSES = 3;
+    // Internal stability instrumentation only. Recognition rules stay frozen.
+    // Android 14+ MediaProjection sessions are one-shot, so sustained capture stalls
+    // require a fresh user authorization instead of rebuilding VirtualDisplay in-place.
+    private static final int CAPTURE_REAUTHORIZE_AFTER_MISSES = 5;
     private static final int FULL_MEM_LOG_EVERY_CYCLES = 5;
 
     private AutomationController(Context context) {
@@ -149,6 +151,8 @@ public class AutomationController {
                 boolean fullMem = cycle == 1 || cycle % FULL_MEM_LOG_EVERY_CYCLES == 0;
                 StabilityDiagnostics.logSnapshot(context, cycle, "before_clip", fullMem);
 
+                long clipDecisionMs;
+                long postCaptureMs;
                 try {
                     if (siglip.ok) {
                         decision = engine.analyzeWithSensual(frames, siglip.scores);
@@ -157,27 +161,27 @@ public class AutomationController {
                         TraceLogger.critical("PERF", "pipeline fallback to full analyze: " + siglip.error);
                         decision = engine.analyze(frames);
                     }
+                    clipDecisionMs = System.currentTimeMillis() - clipStart;
+                    postCaptureMs = System.currentTimeMillis() - postCaptureStart;
+
+                    TraceLogger.critical("PERF",
+                            "cycle=" + cycle +
+                            " frames=" + sampled +
+                            " captureMs=" + capture.captureMs +
+                            " siglipComputeMs=" + siglip.computeMs +
+                            " siglipTailWaitMs=" + siglip.tailWaitMs +
+                            " clipDecisionMs=" + clipDecisionMs +
+                            " postCaptureMs=" + postCaptureMs +
+                            " fallback=" + fallback +
+                            " backend=" + engine.getBackendNote());
                 } finally {
-                    // All pipeline futures have been drained before reaching here, so recycling
-                    // cannot race an ONNX inference reading these bitmaps.
-                }
-                long clipDecisionMs = System.currentTimeMillis() - clipStart;
-                long postCaptureMs = System.currentTimeMillis() - postCaptureStart;
-
-                TraceLogger.critical("PERF",
-                        "cycle=" + cycle +
-                        " frames=" + sampled +
-                        " captureMs=" + capture.captureMs +
-                        " siglipComputeMs=" + siglip.computeMs +
-                        " siglipTailWaitMs=" + siglip.tailWaitMs +
-                        " clipDecisionMs=" + clipDecisionMs +
-                        " postCaptureMs=" + postCaptureMs +
-                        " fallback=" + fallback +
-                        " backend=" + engine.getBackendNote());
-
-                recycle(frames);
-                if (fullMem) {
-                    StabilityDiagnostics.logSnapshot(context, cycle, "after_recycle", true);
+                    // All pipeline futures are drained before CLIP starts. Always release prepared
+                    // frame bitmaps even when Java/ORT throws, so an exception cannot retain a
+                    // whole video's SigLIP + CLIP images until process death.
+                    recycle(frames);
+                    if (fullMem) {
+                        StabilityDiagnostics.logSnapshot(context, cycle, "after_recycle", true);
+                    }
                 }
 
                 String friendly = friendlyResult(decision);
@@ -251,6 +255,7 @@ public class AutomationController {
         ScreenCaptureService cap = ScreenCaptureService.getInstance();
         if (cap == null) throw new IllegalStateException("屏幕捕获还没准备好");
 
+        try {
         while (running.get() && out.size() < MAX_FRAMES) {
             long elapsed = System.currentTimeMillis() - started;
             if (elapsed >= MAX_CAPTURE_MS) break;
@@ -270,16 +275,22 @@ public class AutomationController {
                         "cycle=" + cycle + " miss=" + consecutiveMisses +
                                 " err=" + shortError(e));
 
-                if (consecutiveMisses >= CAPTURE_RECOVER_AFTER_MISSES && running.get()) {
-                    StabilityDiagnostics.logSnapshot(context, cycle, "capture_stalled", true);
-                    boolean recovered = cap.recoverCapturePipeline();
-                    TraceLogger.critical("CAPTURE_RECOVER",
-                            "cycle=" + cycle + " afterMisses=" + consecutiveMisses +
-                                    " recovered=" + recovered);
-                    consecutiveMisses = 0;
-                    if (!recovered && !ScreenCaptureService.isReady()) {
-                        throw new IllegalStateException("屏幕捕获已失效，需要重新授权");
-                    }
+                // If Android has already stopped MediaProjection, fail immediately and ask for a
+                // fresh consent result. Never reuse an old authorization token.
+                if (!ScreenCaptureService.isReady()) {
+                    StabilityDiagnostics.logSnapshot(context, cycle, "capture_projection_stopped", true);
+                    throw new IllegalStateException("屏幕捕获已失效，请回到App重新授权");
+                }
+
+                // A few timeouts can be transient. Only retire the whole capture session after
+                // sustained misses. Recreating VirtualDisplay on the same MediaProjection is not
+                // valid on Android 14+.
+                if (consecutiveMisses >= CAPTURE_REAUTHORIZE_AFTER_MISSES && running.get()) {
+                    StabilityDiagnostics.logSnapshot(context, cycle, "capture_stalled_reauth", true);
+                    TraceLogger.critical("CAPTURE_REAUTH",
+                            "cycle=" + cycle + " afterMisses=" + consecutiveMisses);
+                    cap.invalidateForReauthorization("连续" + consecutiveMisses + "次取帧失败");
+                    throw new IllegalStateException("屏幕捕获连续超时，请回到App重新授权");
                 }
             } finally {
                 if (full != null && !full.isRecycled()) full.recycle();
@@ -302,6 +313,17 @@ public class AutomationController {
         }
 
         return new PipelineCapture(out, futures, System.currentTimeMillis() - started);
+        } catch (Throwable fatal) {
+            // captureFramesPipelined can fail after a SigLIP future has already been submitted.
+            // Drain that work before recycling its bitmaps, then release every prepared frame.
+            PipelineCapture partial = new PipelineCapture(
+                    out, futures, System.currentTimeMillis() - started);
+            drainPipeline(partial);
+            recycle(out);
+            if (fatal instanceof Exception) throw (Exception) fatal;
+            if (fatal instanceof Error) throw (Error) fatal;
+            throw new RuntimeException(fatal);
+        }
     }
 
     private Future<SiglipBatchResult> submitSiglipBatch(
