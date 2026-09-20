@@ -65,15 +65,16 @@ jobs:
           grep -q 'ensureSiglipInputBuffer' "$MODEL"
           grep -q 'ensureClipInputBuffer' "$MODEL"
           grep -q 'MEMBUF' "$MODEL"
-          grep -q 'CAPTURE_RECOVER_AFTER_MISSES = 3' "$CTRL"
-          grep -q 'recoverCapturePipeline' "$CTRL"
-          grep -q 'recoverCapturePipeline' "$CAP"
+          grep -q 'CAPTURE_REAUTHORIZE_AFTER_MISSES = 5' "$CTRL"
+          grep -q 'invalidateForReauthorization' "$CTRL"
+          grep -q 'invalidateForReauthorization' "$CAP"
+          grep -q 'ignored stale MediaProjection onStop' "$CAP"
           grep -q 'getHistoricalProcessExitReasons' "$DIAG"
           grep -q 'getNativeHeapAllocatedSize' "$DIAG"
           grep -q 'getCurrentThermalStatus' "$DIAG"
 
-          grep -q "versionName '0.7.6-internal.1'" app/build.gradle
-          grep -q 'versionCode 13' app/build.gradle
+          grep -q "versionName '0.7.6-internal.2'" app/build.gradle
+          grep -q 'versionCode 14' app/build.gradle
           echo 'Internal stability invariants passed.'
 
       - name: Set up Python
@@ -138,14 +139,14 @@ jobs:
 
       - name: Prepare internal APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.6-internal1.apk
-          sha256sum DouyinFilter-v0.7.6-internal1.apk
-          ls -lh DouyinFilter-v0.7.6-internal1.apk
+          cp app/build/outputs/apk/debug/app-debug.apk DouyinFilter-v0.7.6-internal2.apk
+          sha256sum DouyinFilter-v0.7.6-internal2.apk
+          ls -lh DouyinFilter-v0.7.6-internal2.apk
 
       - name: Upload internal APK artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: DouyinFilter-v0.7.6-internal1-debug-apk
-          path: DouyinFilter-v0.7.6-internal1.apk
+          name: DouyinFilter-v0.7.6-internal2-debug-apk
+          path: DouyinFilter-v0.7.6-internal2.apk
           compression-level: 0
           retention-days: 14
