@@ -34,9 +34,13 @@ public class AutomationController {
     // SigLIP2 inference with capture of the second half. No duplicate model/session is created.
     private static final int SIGLIP_PIPELINE_BATCH = 9;
 
+    // Diagnostics only: no sampling/share/capture timing or recognition rule changes.
+    private static final int FULL_MEM_LOG_EVERY_CYCLES = 5;
+
     private AutomationController(Context context) {
         this.context = context;
         TraceLogger.init(context);
+        StabilityDiagnostics.logStartupExitInfo(context);
         siglipPipelineExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "siglip-pipeline");
             t.setDaemon(true);
@@ -90,6 +94,7 @@ public class AutomationController {
 
     private void loop() {
         TapAccessibilityService service = TapAccessibilityService.getInstance();
+        int cycle = 0;
         try {
             ModelEngine engine = ModelEngine.get(context);
             TapAccessibilityService.setOverlayStatus("正在加载识别模型…");
@@ -97,8 +102,8 @@ public class AutomationController {
             engine.ensureLoaded();
             long modelMs = System.currentTimeMillis() - modelStart;
             TapAccessibilityService.setOverlayStatus("模型好了｜" + engine.getBackendNote() + "｜" + formatMs(modelMs));
+            StabilityDiagnostics.logSnapshot(context, 0, "model_loaded", true);
 
-            int cycle = 0;
             while (running.get()) {
                 cycle++;
                 long cycleStart = System.currentTimeMillis();
@@ -137,6 +142,8 @@ public class AutomationController {
                 SiglipCollected siglip = collectSiglip(capture);
                 long clipStart = System.currentTimeMillis();
                 boolean fallback = false;
+                boolean fullMem = cycle == 1 || cycle % FULL_MEM_LOG_EVERY_CYCLES == 0;
+                StabilityDiagnostics.logSnapshot(context, cycle, "before_clip", fullMem);
                 try {
                     if (siglip.ok) {
                         decision = engine.analyzeWithSensual(frames, siglip.scores);
@@ -145,25 +152,28 @@ public class AutomationController {
                         TraceLogger.critical("PERF", "pipeline fallback to full analyze: " + siglip.error);
                         decision = engine.analyze(frames);
                     }
+
+                    long clipDecisionMs = System.currentTimeMillis() - clipStart;
+                    long postCaptureMs = System.currentTimeMillis() - postCaptureStart;
+
+                    TraceLogger.critical("PERF",
+                            "cycle=" + cycle +
+                            " frames=" + sampled +
+                            " captureMs=" + capture.captureMs +
+                            " siglipComputeMs=" + siglip.computeMs +
+                            " siglipTailWaitMs=" + siglip.tailWaitMs +
+                            " clipDecisionMs=" + clipDecisionMs +
+                            " postCaptureMs=" + postCaptureMs +
+                            " fallback=" + fallback +
+                            " backend=" + engine.getBackendNote());
                 } finally {
-                    // All pipeline futures have been drained before reaching here, so recycling
-                    // cannot race an ONNX inference reading these bitmaps.
+                    // V0.7.5 already owns all normal lifecycle semantics. The only behavioral
+                    // safety change here is deterministic cleanup if Java/ORT throws mid-decision.
+                    recycle(frames);
+                    if (fullMem) {
+                        StabilityDiagnostics.logSnapshot(context, cycle, "after_recycle", true);
+                    }
                 }
-                long clipDecisionMs = System.currentTimeMillis() - clipStart;
-                long postCaptureMs = System.currentTimeMillis() - postCaptureStart;
-
-                TraceLogger.critical("PERF",
-                        "cycle=" + cycle +
-                        " frames=" + sampled +
-                        " captureMs=" + capture.captureMs +
-                        " siglipComputeMs=" + siglip.computeMs +
-                        " siglipTailWaitMs=" + siglip.tailWaitMs +
-                        " clipDecisionMs=" + clipDecisionMs +
-                        " postCaptureMs=" + postCaptureMs +
-                        " fallback=" + fallback +
-                        " backend=" + engine.getBackendNote());
-
-                recycle(frames);
 
                 String friendly = friendlyResult(decision);
                 String detail = sampled + "帧｜女生" + decision.femaleFrames + "/" + decision.checkedFrames +
@@ -206,6 +216,7 @@ public class AutomationController {
             }
         } catch (Throwable e) {
             TraceLogger.critical("AUTO", "exception=" + shortError(e));
+            StabilityDiagnostics.logSnapshot(context, cycle, "caught_exception", true);
             TapAccessibilityService.setOverlayStatus("停下了｜" + shortError(e));
         } finally {
             running.set(false);
