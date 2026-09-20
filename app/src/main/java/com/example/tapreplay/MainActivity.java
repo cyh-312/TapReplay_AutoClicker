@@ -44,7 +44,7 @@ public class MainActivity extends Activity {
         scroll.addView(box);
 
         TextView title = new TextView(this);
-        title.setText("抖音筛选分享 · V0.7.6 内部稳定性测试版");
+        title.setText("抖音筛选分享 · V0.7.6 internal.2");
         title.setTextSize(22);
         box.addView(title);
 
@@ -143,7 +143,7 @@ public class MainActivity extends Activity {
                 "• 目标昵称必须精确匹配；找到后最多点击一次，不会反复点导致选中/取消来回切换。\n" +
                 "• 发送只认底部已经亮起的大面积红色按钮，不拿灰色“发送”文字当成可发送。\n" +
                 "• 发送只点一次；页面响应慢时也不会自动重复发送。\n" +
-                "• 连续屏幕取帧超时会尝试重建采集管线，不会主动上滑两次。\n" +
+                "• 连续屏幕取帧超时会安全结束旧采集会话，并提示重新授权；不会复用已经失效的系统授权。\n" +
                 "• 这一版增加 Java/Native/PSS/温控和上次进程退出原因日志，用于定位长期闪退。\n" +
                 "• 如果键盘意外弹出，会先自动收起。\n" +
                 "• 屏幕尺寸按当前手机自动读取，不固定某一种分辨率。\n");
